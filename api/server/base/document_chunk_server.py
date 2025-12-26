@@ -1,0 +1,226 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+@Time    : 2025/12/24 18:53
+@Author  : weiyutao
+@File    : document_chunk_server.py
+"""
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from datetime import datetime
+import logging
+from pydantic import BaseModel, Field
+from typing import Optional, Any, List
+import traceback
+import json
+import io
+import urllib.parse
+
+# 导入业务 Service
+from api.service.document_chunk_service import DocumentChunkService
+
+
+# === Pydantic 请求模型 ===
+
+class ChunkListRequest(BaseModel):
+    """查询切片列表请求"""
+    document_id: int = Field(..., description="文档ID (必填)")
+    page: int = 1
+    page_size: int = 20
+    keyword: Optional[str] = None
+
+
+class ChunkUpdateRequest(BaseModel):
+    """更新切片内容请求"""
+    chunk_id: str = Field(..., description="切片UUID")
+    content: str = Field(..., min_length=1, description="新的切片内容")
+
+
+class ChunkDeleteRequest(BaseModel):
+    """删除单个切片请求"""
+    chunk_id: str = Field(..., description="切片UUID")
+
+
+class DocumentChunkServer:
+    """
+    文档切片 (Chunk) 接口服务
+    负责处理前端关于 Knowledge Base 详情页的请求
+    """
+
+    def __init__(self, document_chunk_service: DocumentChunkService):
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.document_chunk_service = document_chunk_service
+
+    def register_routes(self, app: FastAPI):
+        """注册路由"""
+        # 查询列表 (Knowledge Base 详情页主要接口)
+        app.post("/api/document_chunk/list")(self.get_chunk_list)
+        
+        # 更新切片内容 (人工修正)
+        app.post("/api/document_chunk/update")(self.update_chunk)
+        
+        # 删除单个切片 (人工清洗)
+        app.post("/api/document_chunk/delete")(self.delete_chunk)
+
+        # 删除某个id的所有切片
+        app.post("/api/document_chunk/delete_by_id")(self.delete_chunk_by_id)
+        
+        # 下载最新的json chunk数据
+        app.get("/api/document_chunk/download/{document_id}")(self.download_latest_json)
+        
+        # 获取最新的json内容
+        app.get("/api/document_chunk/preview/{document_id}")(self.get_chunk_json_content)
+
+    # === 辅助方法：生成统一响应 (与 PdfDocumentServer 保持一致) ===
+    def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
+        return JSONResponse(
+            status_code=code,
+            content={
+                "success": success,
+                "message": message,
+                "data": jsonable_encoder(data) if data is not None else None,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
+
+    # === 接口实现 ===
+    async def download_latest_json(self, document_id: int):
+        """GET 下载最新的 Chunk JSON (基于数据库实时生成)"""
+        try:
+            # 1. 从数据库获取最新数据
+            data_list = await self.document_chunk_service.export_chunks_as_json(document_id)
+            
+            if not data_list:
+                return self._response(False, "未找到数据", code=404)
+
+            # 2. 序列化为 JSON 字符串
+            json_str = json.dumps(data_list, ensure_ascii=False, indent=2)
+            
+            # 3. 转换为字节流
+            stream = io.BytesIO(json_str.encode("utf-8"))
+            
+            # 4. 生成文件名 (这里可以查一下 doc 的 filename，为了演示简写了)
+            filename = f"doc_{document_id}_latest.json"
+            encoded_filename = urllib.parse.quote(filename)
+            
+            # 5. 返回流式响应
+            return StreamingResponse(
+                stream, 
+                media_type="application/json", 
+                headers={
+                    "Content-Disposition": f"attachment; filename*=utf-8''{encoded_filename}"
+                }
+            )
+
+        except Exception as e:
+            self.logger.error(f"下载失败: {traceback.format_exc()}")
+            return self._response(False, f"下载失败: {str(e)}", code=500)
+
+
+    async def get_chunk_json_content(self, document_id: int):
+        """
+        GET 获取 JSON 内容 (用于前端预览/编辑器展示)
+        返回标准 JSON 结构，而不是文件流
+        """
+        try:
+            # 1. 复用同一个 Service 方法
+            data_list = await self.document_chunk_service.export_chunks_as_json(document_id)
+            
+            # 2. 直接返回标准响应结构
+            # 这样前端 axios 拿到的直接就是 JSON 对象，可以直接渲染在编辑器里
+            return self._response(True, "获取成功", data=data_list)
+
+        except Exception as e:
+            self.logger.error(f"获取 JSON 内容异常: {traceback.format_exc()}")
+            return self._response(False, f"获取失败: {str(e)}", code=500)
+
+
+    async def get_chunk_list(self, request: ChunkListRequest):
+        """POST 查询某文档下的切片列表"""
+        try:
+            # 1. 简单校验
+            if not request.document_id:
+                return self._response(False, "缺少文档ID", code=400)
+
+            # 2. 调用 Service
+            result = await self.document_chunk_service.get_chunk_list(
+                document_id=request.document_id,
+                page=request.page,
+                page_size=request.page_size,
+                keyword=request.keyword
+            )
+            
+            return self._response(True, "查询成功", result)
+
+        except Exception as e:
+            self.logger.error(f"查询 Chunk 列表异常: {traceback.format_exc()}")
+            return self._response(False, f"查询失败: {str(e)}", code=500)
+
+
+    async def update_chunk(self, request: ChunkUpdateRequest):
+        """POST 更新切片内容"""
+        try:
+            # 1. 校验
+            if not request.chunk_id:
+                return self._response(False, "缺少切片ID", code=400)
+
+            # 2. 调用 Service
+            success = await self.document_chunk_service.update_chunk_content(
+                chunk_id=request.chunk_id, 
+                new_content=request.content
+            )
+
+            if success:
+                # 注意：这里可能需要提示前端，更新后该切片变成了"未索引"状态
+                return self._response(True, "更新成功")
+            else:
+                return self._response(False, "切片不存在或更新失败", code=404)
+
+        except Exception as e:
+            self.logger.error(f"更新 Chunk 异常: {traceback.format_exc()}")
+            return self._response(False, f"更新失败: {str(e)}", code=500)
+
+
+    async def delete_chunk(self, request: ChunkDeleteRequest):
+        """POST 删除单个切片"""
+        try:
+            # 1. 校验
+            if not request.chunk_id:
+                return self._response(False, "缺少切片ID", code=400)
+
+            # 2. 调用 Service
+            success = await self.document_chunk_service.delete_chunk(request.chunk_id)
+
+            if success:
+                # TODO: 实际上这里最好能异步触发删除向量库(Qdrant)中的对应数据
+                return self._response(True, "删除成功")
+            else:
+                return self._response(False, "切片不存在或删除失败", code=404)
+
+        except Exception as e:
+            self.logger.error(f"删除 Chunk 异常: {traceback.format_exc()}")
+            return self._response(False, f"删除失败: {str(e)}", code=500)
+        
+        
+    async def delete_chunk_by_id(self, request: ChunkListRequest):
+        """POST 删除单个切片"""
+        try:
+            # 1. 校验
+            if not request.document_id:
+                return self._response(False, "缺少document_id", code=400)
+
+            # 2. 调用 Service
+            success = await self.document_chunk_service.delete_chunks_by_doc_id(request.document_id)
+
+            if success:
+                # TODO: 实际上这里最好能异步触发删除向量库(Qdrant)中的对应数据
+                return self._response(True, "删除成功")
+            else:
+                return self._response(False, f"{request.document_id} chunks不存在或删除失败", code=404)
+
+        except Exception as e:
+            self.logger.error(f"{request.document_id} chunks 异常: {traceback.format_exc()}")
+            return self._response(False, f"删除失败: {str(e)}", code=500)

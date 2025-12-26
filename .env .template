@@ -1,0 +1,9 @@
+SEARCH_CONFIG_PATH=agent/config/yaml/search_config_case.yaml
+LLM_CONFIG_PATH=config/yaml/llm_config.yaml
+SQL_CONFIG_PATH=config/yaml/sql_config.yaml
+TOOL_CONFIG_PATH=config/yaml/tool_config.yaml
+RETRIEVAL_DATA_PATH=retrieval_data
+RETRIEVAL_STORAGE_PATH=retrieval_storage
+API_PREFIX=https://ai.shunxikj.com:8890
+MODEL_PATH=models
+

@@ -1,0 +1,9 @@
+problems.txt
+*.pyc
+*.yaml
+!docker-compose.yaml
+!config/yaml/*.yaml.template
+logs/
+docs/
+.env
+test.py

@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+dotenv
+python-multipart
+PyPDF2
+requests
+pypdf
+pymupdf
+git+https://github.com/wytyl13/agent.git@weiyutao
