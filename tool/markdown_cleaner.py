@@ -9,11 +9,13 @@
 import re
 import json
 import os
+import asyncio
 from typing import List, Dict
 from pathlib import Path
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from agent.config.llm_config import LLMConfig
 
+from api.service.llm_config_service import LLMConfigService
 
 
 # ================= 1. 完整的高智商 Prompts (未删减版) =================
@@ -83,20 +85,33 @@ PROMPTS = {
 # ================= 2. 简化的 Python 逻辑结构 =================
 
 class MarkdownCleaner:
-    def __init__(self, file_path: str):
+    def __init__(
+        self, 
+        file_path: str,
+        llm_config_service: LLMConfigService,
+        doc_id: int
+    ):
         self.file_path = None
-        self._load_config()
+        self.llm_config_service = llm_config_service
+        # self._load_config()
         self.lines = self._process_input(file_path)
+        self.doc_id = doc_id
         self.candidates: List[Dict] = []
 
-    def _load_config(self):
+    # def _load_config(self):
+    #     """初始化配置"""
+    #     root = Path(__file__).parent.parent
+    #     config_path = root / "config" / "yaml" / "deepseek_config.yaml"
+    #     config = LLMConfig.from_file(str(config_path))
+    #     self.client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+    #     self.model = config.model
+        
+    async def _load_config(self):
         """初始化配置"""
-        root = Path(__file__).parent.parent
-        config_path = root / "config" / "yaml" / "deepseek_config.yaml"
-        config = LLMConfig.from_file(str(config_path))
-        self.client = OpenAI(api_key=config.api_key, base_url=config.base_url)
-        self.model = config.model
-
+        config = await self.llm_config_service.get_config_by_doc_id(doc_id=self.doc_id, field_llm_name="h_title_llm_config")
+        self.client = AsyncOpenAI(api_key=config.get("api_key"), base_url=config.get("base_url"))
+        self.model = config.get("model_name")
+        
     def _load_file(self) -> List[str]:
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"❌ 文件不存在: {self.file_path}")
@@ -130,10 +145,10 @@ class MarkdownCleaner:
         return file_path.splitlines(keepends=True)
 
 
-    def _call_llm(self, system_prompt: str, user_content: str, is_json_mode=True) -> Dict:
+    async def _call_llm(self, system_prompt: str, user_content: str, is_json_mode=True) -> Dict:
         """核心工具方法：统一封装 API 调用"""
         try:
-            resp = self.client.chat.completions.create(
+            resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -170,7 +185,7 @@ class MarkdownCleaner:
         print(f"✅ 提取到 {len(self.candidates)} 个候选标题。")
         return self.candidates
 
-    def analyze_style(self) -> str:
+    async def analyze_style(self) -> str:
         """步骤2：分析风格 (使用未删减的 ANALYSIS Prompt)"""
         if not self.candidates: return ""
         print("步骤2: 分析文档风格...")
@@ -179,7 +194,7 @@ class MarkdownCleaner:
         sample = json.dumps(self.candidates[:300], ensure_ascii=False, indent=2)
         
         # 调用 LLM (非 JSON 模式，因为要返回规则文本)
-        rules = self._call_llm(
+        rules = await self._call_llm(
             PROMPTS["ANALYSIS"], 
             f"请分析以下疑似标题序列：\n{sample}", 
             is_json_mode=False
@@ -192,36 +207,73 @@ class MarkdownCleaner:
         print(f"--> 生成的规则摘要: {rules.replace(chr(10), ' ')}...")
         return rules.strip()
 
-    def process_batches(self, adaptive_rules: str, batch_size=300) -> Dict[str, int]:
-        """步骤3：分批处理 (使用未删减的 EXECUTION Prompt)"""
-        print(f"步骤3: 开始批处理 (Batch Size: {batch_size})...")
-        
-        # 组装完整的 System Prompt
+    async def process_batch_single(self, batch: List[Dict], adaptive_rules: str) -> Dict[str, int]:
+        """
+        [辅助方法] 处理单个批次
+        被 process_batches_concurrently 并发调用
+        """
+        # 1. 组装 Prompt
         sys_prompt = PROMPTS["EXECUTION"].replace("{adaptive_rules}", adaptive_rules)
+        batch_json = json.dumps(batch, ensure_ascii=False)
+        user_msg = PROMPTS["USER_MSG"].replace("{json_data}", batch_json)
+        
+        # 2. 异步调用 LLM
+        # 注意：这里会 await，但在并发模式下，它是与其他批次的 await 同时进行的
+        result = await self._call_llm(sys_prompt, user_msg, is_json_mode=True)
+        
+        # 3. 格式化结果 (兼容列表或字典返回)
+        batch_result = {}
+        
+        # 情况 A: LLM 返回 [{"line_id": 1, "level": 2}, ...]
+        if isinstance(result, list):
+            for item in result:
+                if "line_id" in item: 
+                    # 确保 key 是字符串，value 是整数
+                    batch_result[str(item["line_id"])] = int(item.get("level", 0))
+                    
+        # 情况 B: LLM 返回 {"1": 2, "5": 1, ...}
+        elif isinstance(result, dict):
+             batch_result.update({str(k): int(v) for k, v in result.items()})
+             
+        return batch_result
+
+    async def process_batches_concurrently(self, adaptive_rules: str, batch_size=300) -> Dict[str, int]:
+        """
+        步骤3：并发批处理 (速度提升核心)
+        同时发出所有批次的 LLM 请求，而不是串行等待
+        """
+        print(f"步骤3: 开始并发处理 (Batch Size: {batch_size}, Total Items: {len(self.candidates)})...")
+        
+        total = len(self.candidates)
+        tasks = []
         all_results = {}
 
-        total = len(self.candidates)
-        # 动态切片循环
+        # 1. 创建所有批次的协程任务 (Task Creation)
+        # 此时并没有真正阻塞等待，只是把任务打包
         for i in range(0, total, batch_size):
             batch = self.candidates[i : i + batch_size]
-            batch_json = json.dumps(batch, ensure_ascii=False)
-            user_msg = PROMPTS["USER_MSG"].replace("{json_data}", batch_json)
+            # 调用刚才添加的辅助方法 process_batch_single
+            tasks.append(self.process_batch_single(batch, adaptive_rules))
             
-            # 调用 LLM
-            result = self._call_llm(sys_prompt, user_msg, is_json_mode=True)
-            
-            if result:
-                # 兼容 {line_id: level} 或 [{line_id:..., level:...}]
-                if isinstance(result, list):
-                    for item in result:
-                        if "line_id" in item: all_results[str(item["line_id"])] = item.get("level", 0)
-                else:
-                    all_results.update({str(k): v for k, v in result.items()})
-                    
-                print(f"  - 进度: {min(i+batch_size, total)}/{total} 行处理完毕。")
-            else:
-                print(f"  ❌ 批次 {i} 处理失败。")
+        if not tasks:
+            return {}
 
+        # 2. 并发执行所有请求！(Concurrent Execution)
+        # asyncio.gather 会同时等待所有任务完成
+        # 耗时取决于最慢的那一个批次，而不是所有批次之和
+        try:
+            results_list = await asyncio.gather(*tasks)
+        except Exception as e:
+            print(f"❌ 并发批处理过程中发生错误: {e}")
+            return {}
+        
+        # 3. 合并结果 (Aggregation)
+        # results_list 是一个列表，包含了每个 process_batch_single 返回的字典
+        for res in results_list:
+            if res:
+                all_results.update(res)
+            
+        print(f"✅ 并发处理完成，共获取 {len(all_results)} 条层级规则。")
         return all_results
 
     def apply_changes(self, headers_map: Dict[str, int], output_path=None):
@@ -264,10 +316,11 @@ class MarkdownCleaner:
         if len(clean) < 3: return False
         return bool(re.search(r'(\.{2,}|。{2,})', clean) or re.search(r'\s\d{1,4}$', clean))
 
-    def run(self):
+    async def run(self):
+        await self._load_config()
         if not self.extract_candidates(): return
-        rules = self.analyze_style()
-        results = self.process_batches(rules)
+        rules = await self.analyze_style()
+        results = await self.process_batches_concurrently(rules)
         return self.apply_changes(results)
 
 if __name__ == "__main__":

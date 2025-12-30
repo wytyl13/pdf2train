@@ -1,3 +1,3 @@
-host: "localhost:9000"
+host: "minio:9000"
 username: "admin"
 password: "password123"

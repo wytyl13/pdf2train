@@ -19,7 +19,7 @@ from api.service.minio_service import MinioService
 
 # 定义请求模型
 class PdfConvertRequest(BaseModel):
-    id: int
+    doc_id: int
     is_ocr: Optional[bool] = None
     split_pages: Optional[int] = None
 
@@ -41,7 +41,7 @@ class Pdf2MdServer:
     async def convert_pdf(self, request: PdfConvertRequest, background_tasks: BackgroundTasks):
         try:
             # 1. 校验 ID
-            if not request.id:
+            if not request.doc_id:
                 return JSONResponse(status_code=400, content={"success": False, "message": "缺少文档ID"})
             
             is_ocr = request.is_ocr or True
@@ -50,7 +50,7 @@ class Pdf2MdServer:
             # 2. 将耗时任务放入后台队列
             background_tasks.add_task(
                 self.pdf2md_service.process_pdf_pipeline,
-                doc_id=request.id,
+                doc_id=request.doc_id,
                 is_ocr=is_ocr,
                 split_pages=split_pages
             )
@@ -59,7 +59,7 @@ class Pdf2MdServer:
             return JSONResponse(content={
                 "success": True, 
                 "message": "Task submitted successfully", 
-                "doc_id": request.id
+                "doc_id": request.doc_id
             })
         except Exception as e:
             import traceback

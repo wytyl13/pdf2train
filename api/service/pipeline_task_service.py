@@ -278,8 +278,8 @@ class PipelineTaskService:
             # 你可以根据 task_type 做 switch case，也可以做通用匹配
             
             # 1. 清理 bucket/path 组合，注意仅仅是清理了markdown这个路径，剩余的步骤的产出物也需要清理
-            bucket = result_data.get('bucket')
-            path = result_data.get('path') or result_data.get('markdown_path') or result_data.get('chunks_json_path')
+            bucket = result_data.get('bucket') or result_data.get('json_bucket')
+            path = result_data.get('path') or result_data.get('markdown_path') or result_data.get('chunks_json_path') or result_data.get('json_path')
             
             if bucket and path:
                 try:

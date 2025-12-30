@@ -15,12 +15,18 @@ from typing import Optional, Dict, Any, List
 from fastapi.encoders import jsonable_encoder
 import traceback
 
+
 # 导入刚才写的 Service
 from api.service.pdf_document_service import PdfDocumentService
 from api.service.minio_service import MinioService
+
+
+
+
+
 # === Pydantic 请求模型 ===
 class PdfDocRequest(BaseModel):
-    id: Optional[int] = None
+    doc_id: Optional[int] = None
     file_name: Optional[str] = None
     bucket_name: Optional[str] = None
     object_name: Optional[str] = None
@@ -40,6 +46,8 @@ class PdfDocRequest(BaseModel):
     filter_step_type: Optional[int] = None
     filter_step_status: Optional[List[int]] = None
     
+    instruction_gen_llm_config: Optional[str] = None
+    h_title_llm_config: Optional[str] = None
     
     # 用户
     user_name: Optional[str] = None
@@ -49,7 +57,7 @@ class PdfDocRequest(BaseModel):
     
     
 class ContentSaveRequest(BaseModel):
-    id: int
+    doc_id: int
     content: str
     
 
@@ -61,8 +69,6 @@ class PdfDocumentServer:
         # 初始化业务 Service
         self.pdf_document_service = pdf_document_service
         self.minio_service = minio_service
-        self.minio_base_url = self.minio_service.endpoint
-        self.protocol = "http://" if "localhost" in self.minio_base_url else "https://"
     
     def register_routes(self, app: FastAPI):
         """注册路由"""
@@ -103,7 +109,7 @@ class PdfDocumentServer:
     
     async def get_pdf_documents(
         self,
-        id: Optional[int] = None,
+        doc_id: Optional[int] = None,
         file_name: Optional[str] = None,
         bucket_name: Optional[str] = None,
         status: Optional[List[int]] = None,
@@ -117,12 +123,10 @@ class PdfDocumentServer:
         try:
             # 1. 组装查询条件
             condition = {}
-            if id is not None: condition["id"] = id
+            if doc_id is not None: condition["id"] = doc_id
             if file_name: condition["file_name"] = file_name
             if bucket_name: condition["bucket_name"] = bucket_name
             if status is not None: condition["status"] = status
-
-            base_url = f"{self.pdf_document_service.protocol}{self.minio_base_url}"
 
             # 2. 调用 Service
             result_data = await self.pdf_document_service.get_document_list(
@@ -163,7 +167,7 @@ class PdfDocumentServer:
     ):
         """POST 方式查询列表"""
         return await self.get_pdf_documents(
-            id=request.id,
+            doc_id=request.doc_id,
             file_name=request.file_name,
             bucket_name=request.bucket_name,
             status=request.status,
@@ -185,7 +189,7 @@ class PdfDocumentServer:
             # 2. 组装数据 (过滤掉 None 值)
             insert_data = request.dict(exclude_unset=True)
             # 移除 id，因为是新建
-            if "id" in insert_data: del insert_data["id"]
+            if "doc_id" in insert_data: del insert_data["doc_id"]
 
             # 3. 调用 Service
             result = await self.pdf_document_service.create_document(insert_data)
@@ -198,7 +202,7 @@ class PdfDocumentServer:
     async def update_pdf_document(self, request: PdfDocRequest):
         """更新 PDF 记录"""
         try:
-            if not request.id:
+            if not request.doc_id:
                 return self._response(False, "缺少文档ID", code=400)
 
             update_data = request.dict(
@@ -210,7 +214,7 @@ class PdfDocumentServer:
                 return self._response(False, "没有要更新的字段", code=400)
 
             # 2. 调用 Service
-            success = await self.pdf_document_service.update_document(request.id, update_data)
+            success = await self.pdf_document_service.update_document(request.doc_id, update_data)
             return self._response(True, "更新成功") if success else self._response(False, "ID不存在", code=400)
         except Exception as e:
             self.logger.error(f"更新接口异常: {str(e)}")
@@ -221,10 +225,10 @@ class PdfDocumentServer:
         """删除 PDF 记录"""
         try:
             # 1. 简单的参数校验
-            if not request.id:
+            if not request.doc_id:
                 return self._response(False, "缺少文档ID", code=400)
             # 2. 一行代码调用 Service
-            success = await self.pdf_document_service.delete_document(request.id)
+            success = await self.pdf_document_service.delete_document(request.doc_id)
             
             # 3. 封装返回结果
             return self._response(True, "删除成功") if success else self._response(False, "删除失败", code=404)
@@ -233,9 +237,9 @@ class PdfDocumentServer:
             return self._response(False, f"删除失败: {str(e)}", code=500)
         
     
-    async def get_doc_content(self, id: int):
+    async def get_doc_content(self, doc_id: int):
         try:
-            content = await self.pdf_document_service.get_markdown_content(id)
+            content = await self.pdf_document_service.get_markdown_content(doc_id)
             return self._response(True, "获取成功", data={"content": content})
         except ValueError as e:
             return self._response(False, str(e), code=404)
@@ -244,9 +248,9 @@ class PdfDocumentServer:
             return self._response(False, f"系统错误: {str(e)}", code=500)
 
 
-    async def get_original_chunk_content(self, id: int):
+    async def get_original_chunk_content(self, doc_id: int):
         try:
-            content = await self.pdf_document_service.get_chunk_content(id)
+            content = await self.pdf_document_service.get_chunk_content(doc_id)
             return self._response(True, "获取成功", data={"content": content})
         except ValueError as e:
             return self._response(False, str(e), code=404)
@@ -257,7 +261,7 @@ class PdfDocumentServer:
 
     async def save_doc_content(self, request: ContentSaveRequest):
         try:
-            await self.pdf_document_service.save_markdown_content(request.id, request.content)
+            await self.pdf_document_service.save_markdown_content(request.doc_id, request.content)
             return self._response(True, "保存成功")
         except ValueError as e:
             return self._response(False, str(e), code=404)

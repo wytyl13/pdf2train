@@ -1,0 +1,54 @@
+# version: '3.8'
+
+services:
+  # 1. MinIO
+  minio:
+    image: quay.io/minio/minio
+    container_name: minio
+    restart: always
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password123
+    volumes:
+      - ${HOME}/soft/minio_data:/data
+    networks:
+      - soft_default
+
+  # 2. PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: file_metadata
+    volumes:
+      - ${HOME}/soft/postgresql_data:/var/lib/postgresql/data
+    networks:
+      - soft_default
+
+  # 4. 后端服务 pdf2train
+  pdf2train:
+    build: .
+    container_name: pdf2train
+    restart: always
+    ports:
+      - "9039:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - minio
+    networks:
+      - soft_default
+
+networks:
+  soft_default:
+    external: true

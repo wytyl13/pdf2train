@@ -10,7 +10,7 @@ from sqlalchemy import Column, Integer, String, DateTime, BigInteger, Text, JSON
 from dataclasses import dataclass
 from sqlalchemy.orm import relationship
 from enum import IntEnum, unique
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from pydantic import BaseModel, Field
 
 from api.table.base.base import Base
@@ -18,8 +18,9 @@ from api.table.base.base import Base
 
 class ExtractTaskResult(BaseModel):
     """
-    Extract 任务结果的统一数据结构
-    用于：存入数据库(序列化) 和 读取使用(反序列化)
+    1. Extract 任务结果的统一数据结构
+    2. 存储于 PipelineTask.result_data
+    3. 用于：存入数据库(序列化) 和 读取使用(反序列化)
     """
     # 1. Markdown 信息
     md_bucket: str = Field(..., description="Markdown文件所在的桶 (通常是私有桶)")
@@ -45,7 +46,8 @@ class ChunkTaskResult(BaseModel):
     Chunk (切片) 任务结果的统一数据结构
     用途：
     1. 记录中间产物 JSON 文件的位置（用于 Debug、导出或灾备恢复）。
-    2. 记录关键统计信息（切片数量），方便前端列表页直接展示，无需每次都 count(*) 数据库。
+    2. 存储于 PipelineTask.result_data
+    3. 记录关键统计信息（切片数量），方便前端列表页直接展示，无需每次都 count(*) 数据库。
     """
     
     # === 1. JSON 归档文件信息 ===
@@ -67,6 +69,28 @@ class ChunkTaskResult(BaseModel):
         """(逻辑示例) 如果需要拼接下载路径"""
         # 注意：这里可能需要结合外部的 endpoint，或者仅作为标识
         return f"/{self.json_bucket}/{self.json_path}"
+
+
+class InstructionTaskResult(BaseModel):
+    """
+    [Task Result] 指令生成任务的产出结果
+    存储于 PipelineTask.result_data
+    
+    【变更说明】
+    移除了静态文件路径。因为数据已入库，支持随时从数据库动态导出最新版本。
+    此处仅记录任务结束时的统计快照。
+    """
+    
+    # === 统计概览 ===
+    total_count: int = Field(default=0, description="生成的 QA 对总数")
+    total_tokens: int = Field(default=0, description="API 消耗的总 Token 数")
+    
+    # 类型分布统计，用于前端画图
+    # 例如: {"原理机制": 15, "事实定义": 20, "无法回答": 5}
+    type_distribution: Dict[str, int] = Field(default={}, description="QA 类型分布统计")
+    
+    # === 模型信息 ===
+    model_name: str = Field(..., description="使用的基座模型名称")
 
 
 @unique
@@ -121,8 +145,7 @@ class InstructionStatus(IntEnum):
     PENDING = 0
     PROMPT_CONSTRUCTING = 10  # 构造提示词
     LLM_GENERATING = 20       # 调用大模型生成中
-    QA_FILTERING = 30         # 质量过滤/去重
-    DATASET_SAVING = 40       # 保存为训练格式 (JSONL)
+    DATASET_SAVING = 90       # 保存为训练格式 (JSONL)
     SUCCESS = 100
     FAILED = -1
 

@@ -6,4 +6,5 @@ PyPDF2
 requests
 pypdf
 pymupdf
+minio
 git+https://github.com/wytyl13/agent.git@weiyutao

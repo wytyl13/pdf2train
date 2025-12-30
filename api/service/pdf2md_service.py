@@ -27,6 +27,7 @@ from api.service.pdf_document_service import PdfDocumentService
 from api.service.pipeline_task_service import PipelineTaskService
 from api.table.base.pdf_document import DocStatus
 from tool.markdown_cleaner import MarkdownCleaner
+from api.service.llm_config_service import LLMConfigService
 
 # 引入 Model 和 Enum
 from api.table.base.pipeline_task import (
@@ -46,6 +47,7 @@ class Pdf2MdService:
         pdf_document_service: PdfDocumentService,
         task_service: PipelineTaskService,
         mineru_api_url: str,
+        llm_config_service: LLMConfigService,
         work_dir: str = "/tmp/pdf2md_worker"
     ):
         self.minio_service = minio_service  # 注入 MinioService
@@ -53,6 +55,7 @@ class Pdf2MdService:
         self.work_dir = work_dir
         self.task_service = task_service
         self.api_url = mineru_api_url
+        self.llm_config_service = llm_config_service
         self.logger = logging.getLogger("Pdf2MdService")
         os.makedirs(self.work_dir, exist_ok=True)
 
@@ -209,8 +212,9 @@ class Pdf2MdService:
         return extracted_path, final_md_path
 
     # --- 步骤 3: 合并 ---
-    def _merge_results(
+    async def _merge_results(
         self, 
+        doc_id,
         task_dir, 
         chunk_results, 
         final_name,
@@ -234,7 +238,7 @@ class Pdf2MdService:
             if not md_file or not os.path.exists(md_file): continue
             with open(md_file, "r", encoding="utf-8") as f:
                 content = f.read()
-            current_base_url = f"{self.pdf_document_service.protocol}{self.minio_service.endpoint}/{img_bucket_name}/{current_img_prefix}/"
+            current_base_url = f"{self.pdf_document_service.minio_base_url}/{img_bucket_name}/{current_img_prefix}/"
         
             def replace_link(match):
                 alt_text = match.group(1)
@@ -250,7 +254,12 @@ class Pdf2MdService:
         
         # 4. 整体清洗 (移除多余换行等)
         merged_text = "".join(full_md_content)
-        cleaned_text = MarkdownCleaner(merged_text).run()
+        markdown_cleaner = MarkdownCleaner(
+            file_path=merged_text,
+            llm_config_service=self.llm_config_service,
+            doc_id=doc_id
+        )
+        cleaned_text = await markdown_cleaner.run()
 
         # 5. 写入
         final_md_path = os.path.join(final_out_dir, f"{final_name}.md")
@@ -333,13 +342,21 @@ class Pdf2MdService:
             )
             
             base_name = os.path.splitext(os.path.basename(doc.get("object_name")))[0]
-            final_local_md = await self._run_async(
-                self._merge_results, 
+            final_local_md = await self._merge_results( 
+                doc_id,
                 task_dir, 
                 chunk_results, 
                 base_name,
                 self.minio_service.public_bucket,
             )
+            # final_local_md = await self._run_async(
+            #     self._merge_results, 
+            #     doc_id,
+            #     task_dir, 
+            #     chunk_results, 
+            #     base_name,
+            #     self.minio_service.public_bucket,
+            # )
             
             # Step 5: 上传 MD
             remote_md_path = f"{doc_id}/{base_name}.md"

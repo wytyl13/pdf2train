@@ -23,7 +23,7 @@ class HybridMarkdownParser(NodeParser):
     text_splitter: SentenceSplitter = Field(
         description="用于长文本二次切分的切分器"
     )
-    min_content_length: int = Field(default=30, description="过滤阈值，低于此长度的内容将被丢弃")
+    min_content_length: int = Field(default=50, description="过滤阈值，低于此长度的内容将被丢弃")
     _image_pattern: re.Pattern = PrivateAttr()
     
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50, min_content_length: int = 30, **kwargs):

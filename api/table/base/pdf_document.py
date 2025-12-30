@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from api.table.base.base import Base
-from api.table.base.pipeline_task import TaskType, TaskLifecycle, ExtractTaskResult, ChunkTaskResult
+from api.table.base.pipeline_task import TaskType, TaskLifecycle, ExtractTaskResult, ChunkTaskResult, InstructionTaskResult
 
 
 @unique
@@ -74,7 +74,8 @@ class PdfDocument(Base):
     progress = Column(Integer, default=0, comment='总体进度百分比(0-100, -1为失败)')
     
     process_error = Column(Text, nullable=True, comment='全局错误摘要')
-    
+    instruction_gen_llm_config = Column(String(100), nullable=True, comment='指令生成使用的LLM配置名称')
+    h_title_llm_config = Column(String(100), nullable=True, comment='多级标题处理使用的LLM配置名称')
     # === 审计 ===
     user_name = Column(String(64), nullable=False, comment='上传人')
     create_time = Column(DateTime(timezone=True), server_default=func.now(), comment='上传时间')
@@ -183,3 +184,35 @@ class PdfDocument(Base):
         return None
     
     
+    @property
+    def latest_instruction_result(self) -> InstructionTaskResult | None:
+        """
+        [新增] 获取最新的指令生成任务结果
+        对应 TaskType.INSTRUCTION_GEN (30) 步骤
+        返回: 包含 total_count, model_name, type_distribution 等统计信息的对象
+        """
+        if not self.tasks: 
+            return None
+
+        # 1. 筛选指令生成任务
+        # 注意：确保你的 TaskType 枚举中有 INSTRUCTION_GEN
+        inst_tasks = [t for t in self.tasks if t.task_type == TaskType.INSTRUCTION_GEN]
+        
+        if not inst_tasks:
+            return None
+        
+        # 2. 按 ID 倒序排列，取最新的一次尝试
+        inst_tasks.sort(key=lambda x: x.id, reverse=True)
+        latest = inst_tasks[0]
+
+        # 3. 验证状态并解析
+        if latest.status == TaskLifecycle.SUCCESS and latest.result_data:
+            try:
+                # 将数据库中存储的 JSON (dict) 转换为 InstructionTaskResult 对象
+                return InstructionTaskResult.model_validate(latest.result_data)
+            except Exception as e:
+                # 生产环境建议使用 logging
+                print(f"解析指令任务结果失败: {e}")
+                return None
+        
+        return None

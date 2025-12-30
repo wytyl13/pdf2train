@@ -55,12 +55,21 @@ class MinioService:
         self.buckets_to_create = buckets_to_create.extend([default_bucket, self.source_bucket_name, self.target_bucket_name, self.public_bucket]) if buckets_to_create else [default_bucket, self.source_bucket_name, self.target_bucket_name, self.public_bucket]
         self.logger = logging.getLogger("MinioService")
 
-        # 初始化客户端
+        # 初始上传客户端
         self.client = Minio(
             self.endpoint,
             access_key=self.access_key,
             secret_key=self.secret_key,
-            secure=self.secure
+            secure=self.secure,
+        )
+        
+        # 初始化签名生成客户端
+        self.signer_client = Minio(
+            "localhost:9000",
+            access_key=self.access_key,
+            secret_key=self.secret_key,
+            secure=self.secure,
+            region="us-east-1"
         )
         
         # 确保存储桶存在
@@ -257,7 +266,7 @@ class MinioService:
         """获取预签名链接"""
         target_bucket = bucket_name if bucket_name else "pdf-raw"
         url = await self._run_async(
-            self.client.get_presigned_url,
+            self.signer_client.get_presigned_url,
             method="GET",
             bucket_name=target_bucket,
             object_name=object_name,

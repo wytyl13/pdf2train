@@ -16,6 +16,7 @@ from pathlib import Path
 import argparse
 from dotenv import load_dotenv, dotenv_values
 import os
+from openai import OpenAI
 
 # 导入各个底层业务
 from api.service.minio_service import MinioService
@@ -24,6 +25,9 @@ from api.service.pdf_document_service import PdfDocumentService
 from api.service.pipeline_task_service import PipelineTaskService
 from api.service.document_chunk_service import DocumentChunkService
 from api.service.chunk_service import ChunkService
+from api.service.instruction_gen_service import InstructionGenService
+from api.service.instruction_datum_service import InstructionDatumService
+from api.service.llm_config_service import LLMConfigService
 
 # 导入各个服务类
 from api.server.base.minio_server import MinioServer
@@ -33,7 +37,12 @@ from api.server.base.pdf_document_server import PdfDocumentServer
 from api.server.base.pipeline_task_server import PipelineTaskServer
 from api.server.base.document_chunk_server import DocumentChunkServer
 from api.server.base.chunk_server import ChunkServer
+from api.server.base.instruction_gen_server import InstructionGenServer
+from api.server.base.instruction_datum_server import InstructionDatumServer
+from api.server.base.llm_config_server import LLMConfigServer
 
+from tool.h1_context_assembler import H1ContextAssembler
+from tool.instruction_llm_generator import InstructionLLMGenerator
 
 ROOT_DIRECTORY = Path(__file__).parent.parent.parent
 SQL_CONFIG_PATH = str(ROOT_DIRECTORY / "config" / "yaml" / "postgresql.yaml")
@@ -41,7 +50,7 @@ ENV_PATH = str(ROOT_DIRECTORY / ".env")
 REDIS_CONFIG_PATH = str(ROOT_DIRECTORY / "config" / "yaml" / "redis_config.yaml")
 MINIO_CONFIG_PATH = str(ROOT_DIRECTORY / "config" / "yaml" / "minio_config.yaml")
 environment = dotenv_values(ENV_PATH)
-
+MINERU_API_URL = environment.get("MINERU_API_URL", "http://localhost:8000/file_parse")
 
 class AeroSenseMainServer:
     """主服务器类，统一管理所有服务"""
@@ -55,32 +64,41 @@ class AeroSenseMainServer:
         
         # 初始化各个底层业务
         self.task_service = PipelineTaskService(sql_config_path=SQL_CONFIG_PATH)
-        secure = False if minio_config.host.startswith("localhost") else True
+        self.llm_config_service = LLMConfigService(sql_config_path=self.sql_config_path)
+        self.instruction_datum_service = InstructionDatumService(
+            sql_config_path=self.sql_config_path,
+            pipeline_task_service=self.task_service
+        )
         self.minio_service = MinioService(
             endpoint=minio_config.host,
             access_key=minio_config.username,
             secret_key=minio_config.password,
-            secure=secure,
+            secure=False,
             source_bucket_name="pdf-raw",
             target_bucket_name="pdf-processed",
             default_bucket="default",
             public_bucket="public-assets",
             buckets_to_create=[]
         )
-        self.document_chunk_service = DocumentChunkService(sql_config_path=SQL_CONFIG_PATH)
+        self.document_chunk_service = DocumentChunkService(
+            sql_config_path=SQL_CONFIG_PATH,
+            pipeline_task_service=self.task_service
+        )
         self.pdf_document_service = PdfDocumentService(
             sql_config_path=SQL_CONFIG_PATH, 
             minio_service=self.minio_service,
             document_chunk_service=self.document_chunk_service,
-            task_service=self.task_service
+            task_service=self.task_service,
+            instruction_datum_service=self.instruction_datum_service,
+            llm_config_service=self.llm_config_service
         )
         self.pdf2md_service = Pdf2MdService(
             minio_service=self.minio_service,
             pdf_document_service=self.pdf_document_service,
             work_dir="/tmp/pdf2md_worker",
             task_service=self.task_service,
-            # mineru_api_url="https://mineru-api.yuyangkeji.com/file_parse"
-            mineru_api_url="http://localhost:8000/file_parse"
+            llm_config_service=self.llm_config_service,
+            mineru_api_url=MINERU_API_URL
         )
         self.chunk_service = ChunkService(
             pdf_document_service=self.pdf_document_service,
@@ -88,6 +106,22 @@ class AeroSenseMainServer:
             pipeline_task_service=self.task_service,
             minio_service=self.minio_service
         )
+        self.instruction_llm_generator = InstructionLLMGenerator(
+            client=OpenAI(
+                api_key="sk-d8b7a899050f41c7a3deac1cb149cbb4", 
+                base_url="https://api.deepseek.com"
+            ),
+            model_name="deepseek-chat",
+            llm_config_service=self.llm_config_service
+        )
+        self.instruction_gen_service = InstructionGenService(
+            assembler=H1ContextAssembler(),
+            document_chunk_service=self.document_chunk_service,
+            instruction_llm_generator=self.instruction_llm_generator,
+            instruction_datum_service=self.instruction_datum_service,
+            pipeline_task_service=self.task_service
+        )
+        
         
         # 初始化各个服务
         self.minio_storage_server = MinioServer(service=self.minio_service, pdf_document_service=self.pdf_document_service)
@@ -96,6 +130,10 @@ class AeroSenseMainServer:
         self.task_server = PipelineTaskServer(self.task_service)
         self.document_chunk_server = DocumentChunkServer(document_chunk_service=self.document_chunk_service)
         self.chunk_server = ChunkServer(chunk_service=self.chunk_service)
+        self.instruction_gen_server = InstructionGenServer(instruction_gen_service=self.instruction_gen_service)
+        self.instruction_datum_server = InstructionDatumServer(instruction_datum_service=self.instruction_datum_service)
+        self.llm_config_server = LLMConfigServer(llm_config_service=self.llm_config_service)
+        
         # 设置应用
         self._setup_middleware()
         self._setup_base_routes()
@@ -144,6 +182,9 @@ class AeroSenseMainServer:
         self.task_server.register_routes(self.app)
         self.document_chunk_server.register_routes(self.app)
         self.chunk_server.register_routes(self.app)
+        self.instruction_gen_server.register_routes(self.app)
+        self.instruction_datum_server.register_routes(self.app)
+        self.llm_config_server.register_routes(self.app)
 
     def run(
         self, 
@@ -159,11 +200,11 @@ class AeroSenseMainServer:
         
         # 构建uvicorn运行参数
         run_kwargs = {
-            "app": self.app,
+            "app": "api.server.main_server:app",
             "host": host,
             "port": port,
             "log_level": "info",
-            "reload": False,
+            "reload": True,
         }
         
         # 如果提供了SSL证书，则添加SSL配置
@@ -198,11 +239,13 @@ def parse_arguments():
     
     return parser.parse_args()
 
+server = AeroSenseMainServer()
+app = server.app
+
 
 if __name__ == "__main__":
     args = parse_arguments()
     
-    server = AeroSenseMainServer()
     server.run(
         host="0.0.0.0",
         port=args.port,

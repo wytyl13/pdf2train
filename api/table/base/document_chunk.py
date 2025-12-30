@@ -33,7 +33,6 @@ class DocumentChunk(Base):
 
     # === 核心主键 ===
     # 注意：这里使用 UUID 字符串作为主键，是为了方便与 Qdrant (Vector DB) 的 Point ID 保持一致
-    # 如果你的架构强依赖 BigInteger 自增，也可以改回 BigInteger，但需要额外维护一个 uuid 字段给 Qdrant
     id = Column(String(36), primary_key=True, comment='Chunk唯一ID (UUID)')
 
     # === 关联信息 ===

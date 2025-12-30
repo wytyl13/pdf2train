@@ -11,6 +11,8 @@ import asyncio
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy import and_, or_
+from pathlib import Path
+from dotenv import load_dotenv, dotenv_values
 
 # 导入数据库模型和工具
 from api.table.base.pdf_document import PdfDocument, DocStatus, CoverInfo
@@ -19,6 +21,13 @@ from agent.provider.sql_provider import SqlProvider
 from api.service.minio_service import MinioService
 from api.service.pipeline_task_service import PipelineTaskService
 from api.service.document_chunk_service import DocumentChunkService
+from api.service.instruction_datum_service import InstructionDatumService
+from api.service.llm_config_service import LLMConfigService
+
+ROOT_DIRECTORY = Path(__file__).parent.parent.parent
+ENV_PATH = str(ROOT_DIRECTORY / ".env")
+environment = dotenv_values(ENV_PATH)
+MINIO_BASE_URL = environment.get("MINIO_BASE_URL", "http://localhost:9000")
 
 class PdfDocumentService:
     """
@@ -28,6 +37,8 @@ class PdfDocumentService:
         self, 
         sql_config_path: str,
         minio_service: MinioService,
+        instruction_datum_service: InstructionDatumService,
+        llm_config_service: LLMConfigService,
         document_chunk_service: Optional[DocumentChunkService] = None,
         task_service: Optional[PipelineTaskService] = None,
     ):
@@ -35,7 +46,9 @@ class PdfDocumentService:
         self.minio_service = minio_service
         self.document_chunk_service = document_chunk_service or DocumentChunkService(self.sql_config_path)
         self.task_service = task_service or PipelineTaskService(self.sql_config_path)
-        self.protocol = "http://" if "localhost" in self.minio_service.endpoint else "https://"
+        self.instruction_datum_service = instruction_datum_service
+        self.llm_config_service = llm_config_service
+        self.minio_base_url = MINIO_BASE_URL
         self.logger = logging.getLogger(self.__class__.__name__)
 
 
@@ -44,8 +57,7 @@ class PdfDocumentService:
         [私有辅助] 获取 MinIO 的 Base URL
         注意：生产环境可能需要区分内网 IP 和外网域名，这里暂时取 MinIO Service 配置
         """
-        endpoint = self.minio_service.endpoint
-        return f"{self.protocol}{endpoint}"
+        return self.minio_base_url
 
 
     async def get_document_list(
@@ -69,7 +81,9 @@ class PdfDocumentService:
                 "id", "file_name", "bucket_name", "object_name", "file_size", 
                 "page_count", "author", "status", "user_name", "create_time", 
                 "original_title", "summary", "process_error", "content_type",
-                "cover_info", "progress"
+                "cover_info", "progress",
+                "instruction_gen_llm_config",
+                "h_title_llm_config"
             ]
             
             complex_filters = []
@@ -205,6 +219,12 @@ class PdfDocumentService:
             if "progress" not in data:
                 data["progress"] = 0
 
+            if "instruction_gen_llm_config" not in data:
+                data["instruction_gen_llm_config"] = await self.llm_config_service.get_active_config_name()
+
+            if "h_title_llm_config" not in data:
+                data["h_title_llm_config"] = await self.llm_config_service.get_active_config_name()
+            
             sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
             
             # 1. 执行插入 Document
@@ -296,6 +316,9 @@ class PdfDocumentService:
             # 清理数据库中的chunks（待优化）
             await self.document_chunk_service.delete_chunks_by_doc_id(doc_id)
             
+            # 清理instruction chunks
+            await self.instruction_datum_service.delete_by_doc_id(doc_id)
+            
             # 4. 删除源文件
             bucket = doc.bucket_name
             obj_name = doc.object_name
@@ -313,6 +336,9 @@ class PdfDocumentService:
                     self.logger.info(f"封面图已删除: {doc.cover.full_path}")
                 except Exception as e:
                     self.logger.warning(f"封面删除失败: {e}")
+            
+            # 6 删除第二步chunk生成的json
+            
             
             result = await sql_provider.delete_record(record_id=doc_id, hard_delete=True)
             return result
