@@ -60,6 +60,109 @@ class PdfDocumentService:
         return self.minio_base_url
 
 
+    async def export_books_data(
+        self, 
+        filter_step_type: Optional[int] = None,
+        filter_step_status: Optional[List[int]] = None,
+        keyword: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        [新增] 导出书籍清单数据
+        获取全量符合条件的数据，并进行格式化，便于生成 Excel/CSV
+        """
+        try:
+            # 1. 复用 get_document_list 获取全量数据 (page=None, page_size=None)
+            # 传入空字典作为基础 condition
+            result = await self.get_document_list(
+                condition={},
+                page=None,
+                page_size=None,
+                filter_step_type=filter_step_type,
+                filter_step_status=filter_step_status,
+                keyword=keyword
+            )
+            
+            raw_items = result.get("items", [])
+            export_list = []
+
+            # 2. 定义状态映射 (根据您的 DocStatus 定义调整)
+            status_map = {
+                0: "待处理",
+                10: "解析中",
+                20: "合并中",
+                30: "上传中",
+                100: "已完成",
+                -1: "失败"
+            }
+
+            # 3. 数据格式化 (Flatten & Format)
+            for item in raw_items:
+                # 计算文件大小 (MB)
+                size_mb = round(item.get("file_size", 0) / (1024 * 1024), 2)
+                
+                # 格式化时间
+                create_time = item.get("create_time")
+                create_time_str = create_time.strftime("%Y-%m-%d %H:%M:%S") if isinstance(create_time, datetime) else str(create_time)
+
+                # 获取状态文本
+                status_code = item.get("status")
+                status_text = status_map.get(status_code, f"未知({status_code})")
+
+                # 构造导出行的字典 (Keys 将作为 Excel/CSV 的表头)
+                row = {
+                    "文档ID": str(item.get("id")),
+                    "文件名称": item.get("file_name"),
+                    "原标题": item.get("original_title") or "",
+                    "作者": item.get("author") or "未知",
+                    "文件大小(MB)": size_mb,
+                    "页数": item.get("page_count", 0),
+                    "当前状态": status_text,
+                    "上传用户": item.get("user_name"),
+                    "上传时间": create_time_str,
+                    "摘要": item.get("summary") or "",
+                    "下载链接": item.get("download_url") or ""
+                }
+                export_list.append(row)
+
+            return export_list
+
+        except Exception as e:
+            self.logger.error(f"导出数据准备失败: {str(e)}")
+            raise e
+
+
+    async def export_books_jsonl(
+        self, 
+        filter_step_type: Optional[int] = None,
+        filter_step_status: Optional[List[int]] = None,
+        keyword: Optional[str] = None
+    ) -> str:
+        """
+        [新增] 导出书籍清单为 JSONL 格式字符串
+        每行一个 JSON 对象，便于流式读取或作为日志/备份文件
+        """
+        import json
+        
+        # 1. 复用 export_books_data 获取清洗后的列表
+        # (如果您希望导出原始字段名，可以改调 get_document_list)
+        data_list = await self.export_books_data(
+            filter_step_type=filter_step_type,
+            filter_step_status=filter_step_status,
+            keyword=keyword
+        )
+        
+        # 2. 生成 JSONL 字符串
+        # ensure_ascii=False 确保中文不被转义
+        # default=str 处理 datetime 等无法直接序列化的对象 (虽然 export_books_data 已经处理了)
+        jsonl_lines = [
+            json.dumps(row, ensure_ascii=False, default=str) 
+            for row in data_list
+        ]
+        
+        # 3. 用换行符连接
+        return "\n".join(jsonl_lines)
+
+
     async def get_document_list(
         self, 
         condition: Dict[str, Any], 

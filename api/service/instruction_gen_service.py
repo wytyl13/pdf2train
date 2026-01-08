@@ -27,6 +27,7 @@ from api.service.instruction_datum_service import InstructionDatumService
 from api.service.pipeline_task_service import PipelineTaskService
 from api.table.base.pipeline_task import InstructionStatus, TaskLifecycle, InstructionTaskResult, TaskType
 from api.table.base.pdf_document import PdfDocument
+from api.service.llm_config_service import LLMConfigService
 
 from tool.instruction_llm_generator import InstructionLLMGenerator
 
@@ -41,6 +42,7 @@ class InstructionGenService:
         document_chunk_service: DocumentChunkService,
         instruction_llm_generator: InstructionLLMGenerator,
         instruction_datum_service: InstructionDatumService,
+        llm_config_service: LLMConfigService,
         pipeline_task_service: PipelineTaskService
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -48,6 +50,7 @@ class InstructionGenService:
         self.document_chunk_service = document_chunk_service
         self.instruction_llm_generator = instruction_llm_generator
         self.instruction_datum_service = instruction_datum_service
+        self.llm_config_service = llm_config_service
         self.pipeline_task_service = pipeline_task_service
         
 
@@ -78,6 +81,7 @@ class InstructionGenService:
         
         # 1 get raw_data
         raw_chunks = await self.document_chunk_service.export_chunks_as_json(doc_id=doc_id)
+        chunk_index_map = {c['id']: c['chunk_index'] for c in raw_chunks}
         # 2 h1 context assembler
         h1_content_assembler = self.assembler.process(raw_chunks)
         
@@ -102,9 +106,9 @@ class InstructionGenService:
         processed_titles = await self.instruction_datum_service.get_processed_h1_titles(task_id)
         processed_titles = []
         current_processed_chars = 0
-
         # 5 instruction llm generator
         for idx, h1_data in enumerate(h1_content_assembler):
+            has_error = False
             h1_title = h1_data.get('h1_title', 'Unknown')
             prompt_text = h1_data.get('prompt_text', '')
             
@@ -146,13 +150,24 @@ class InstructionGenService:
                         item['doc_id'] = doc_id        # 补全 doc_id
                         item['task_id'] = task_id        # 补全 task_id
                         item['h1_title'] = h1_title      # 补全 h1_title
-                    
+                        chunk_index_description = []
+                        # 添加前端显示chunk编号的字段，因为现在的item中的ref_chunk_ids字段是uuid，如果用户需要追踪不容易，所以以chunk{int}的形式展示最好
+                        # 和对应的knowledge base菜单栏中的chunk编号一致
+                        ref_chunk_ids = item.get('ref_chunk_ids', [])
+                        for ref_chunk_id in ref_chunk_ids:
+                            item_chunk_index = chunk_index_map.get(ref_chunk_id)
+                            if item_chunk_index is not None:
+                                chunk_index_description.append(f"chunk {item_chunk_index + 1}")
+                            else:
+                                chunk_index_description.append(f"chunk ?")
+                        item['chunk_index_description'] = chunk_index_description   
+
                     # --- C.1 数据库存储伪代码 (DB Storage Pseudo-code) 包含instruction data数据表和进度数据表---
                     await self.instruction_datum_service.batch_save_instructions(generated_data)
                     
                     # C.2 积累返回结果
                     all_generated_results.extend(generated_data)
-                    
+                    self.logger.info(f"✅ Saved {len(generated_data)} instructions for {h1_title}")
                     # C.3 统计生成结果
                     for item in generated_data:
                         # 统计类型
@@ -161,17 +176,11 @@ class InstructionGenService:
                         # 统计 Token (如果有)
                         total_tokens += item.get('metadata', {}).get('token_usage', 0)
                     
-                    # C.4 计算进度并更新任务状态
-                    current_processed_chars += len(prompt_text)
-                    progress = self.calculate_progress(current_processed_chars, total_chars)
-                    await self.pipeline_task_service.update_task_status(
-                        task_id=task_id, 
-                        status=TaskLifecycle.RUNNING.value,
-                        detailed_status=InstructionStatus.LLM_GENERATING.value,
-                        progress=progress
-                    )
             except Exception as e:
-                error_msg = f"❌ Error processing chapter {h1_title}: {e}"
+                has_error = True
+                import traceback
+                traceback.print_exc()
+                error_msg = f"❌ Error processing chapter {h1_title}: {(str(e))} \n"
                 self.logger.error(error_msg)
                 await self.pipeline_task_service.update_task_status(
                     task_id=task_id, 
@@ -179,15 +188,37 @@ class InstructionGenService:
                     detailed_status=InstructionStatus.FAILED.value,
                     error_message=error_msg
                 )
-                continue
+                # 报错一次就终止
+                # continue
+            finally:
+                # C.4 计算进度并更新任务状态
+                current_processed_chars += len(prompt_text)
+                if not has_error:
+                    # 计算进度
+                    # 注意：这里可能因为取整导致看起来没变，所以我们打印日志观察
+                    raw_progress = 20 + (70 * (current_processed_chars / total_chars))
+                    progress = int(max(20, min(raw_progress, 100)))
+                    
+                    self.logger.info(f"📈 Progress update: Raw={raw_progress:.2f}%, Int={progress}% (Processed {current_processed_chars}/{total_chars})")
+                    
+                    # 更新数据库
+                    await self.pipeline_task_service.update_task_status(
+                        task_id=task_id, 
+                        status=TaskLifecycle.RUNNING.value,
+                        detailed_status=InstructionStatus.LLM_GENERATING.value,
+                        progress=progress
+                    )
         
         # 6. 构造并更新成功状态
+        config = await self.llm_config_service.get_config_by_doc_id(doc_id=doc_id, field_llm_name='instruction_gen_llm_config')
         task_result = InstructionTaskResult(
             total_count=len(all_generated_results),
             total_tokens=total_tokens,
             type_distribution=type_distribution,
-            model_name=self.instruction_llm_generator.model_name
+            model_name=config.get('model_name', 'Unknown')
         )
+        
+        # 更新状态为成功并激活下一步
         await self.pipeline_task_service.update_task_status(
             task_id=task_id, 
             status=TaskLifecycle.SUCCESS.value,
@@ -195,5 +226,6 @@ class InstructionGenService:
             progress=100,
             result_data=task_result.model_dump()
         )
+        await self.pipeline_task_service.activate_next_step(doc_id=doc_id, current_step_order=3)
         self.logger.info(f"🎉 Finished processing doc {doc_id}. Total generated: {len(all_generated_results)}")
         return all_generated_results

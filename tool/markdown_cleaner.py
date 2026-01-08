@@ -130,20 +130,73 @@ class MarkdownCleaner:
             self.file_path = file_path
             # print(f"📂 检测到输入为文件路径: {data}")
             with open(file_path, 'r', encoding='utf-8') as f:
-                return f.readlines()
+                content = f.read()
+        else:
+            # 2. 安全检查：看起来像路径但文件不存在
+            is_path_like = len(file_path) < 255 and '\n' not in file_path and (file_path.endswith('.md') or os.sep in file_path)
+            if is_path_like and not os.path.exists(file_path):
+                 raise FileNotFoundError(f"❌ 看起来像路径但文件不存在: {file_path}")
+            
+            # 3. 视为直接的 Markdown Content
+            content = file_path
+        content = self._clean_ocr_artifacts(content)
+        return content.splitlines(keepends=True)
+
+
+    def _clean_ocr_artifacts(self, text: str) -> str:
+        """
+        [安全增强版] 清洗 OCR/PDF 解析产生的数字伪影
+        逻辑：
+        1. 先处理"整块都是伪影"的情况（直接拆掉 $）。
+        2. 再处理"公式内部数字有空格"的情况（保留 $，只修内容）。
+        """
+        if not text: return ""
+
+        def _remove_space(match):
+            return match.group(1).replace(" ", "")
+
+        # =========================================================
+        # 1. 安全清洗：整块都是伪影的情况 -> 拆掉外壳
+        # =========================================================
+        # 目标：$( 5 0 % )$  -> 50%
+        # 目标：$ 50 \ % $   -> 50%
+        # 目标：$ 50 % $     -> 50%
+        # 逻辑：开头必须是 $ 或 $(，结尾必须是 $ 或 )，且中间只能是 数字+空格+\%+反斜杠
+        # 这样就不会误伤 $ x = 50\% $
         
-        # 2. 安全检查（可选）：如果看起来像路径但文件不存在，抛出异常
-        # 如果字符串很短、没换行且包含路径分隔符，可能是用户写错了路径
-        # (这一步是为了防止用户想传路径却写错，导致程序把它当成一行文本处理了)
-        is_path_like = len(file_path) < 255 and '\n' not in file_path and (file_path.endswith('.md') or os.sep in file_path)
-        if is_path_like and not os.path.exists(file_path):
-             raise FileNotFoundError(f"❌ 看起来像路径但文件不存在: {file_path}")
+        pattern_full_artifact = r'(?:\$|\$\()\s*(\d+(?:\s+\d+)*)\s*\\?%\s*(?:\)|\$)'
+        
+        def _unwrap_artifact(match):
+            # match.group(1) 是纯数字部分 "5 0"
+            return f"{match.group(1).replace(' ', '')}%"
+            
+        text = re.sub(pattern_full_artifact, _unwrap_artifact, text)
 
-        # 3. 视为直接的 Markdown Content
-        # print("📝 检测到输入为 Markdown 文本内容")
-        # keepends=True 非常重要！它能保留行尾的 \n，保持与 f.readlines() 格式一致
-        return file_path.splitlines(keepends=True)
+        # =========================================================
+        # 2. 内部清洗：只修数字，不动环境
+        # =========================================================
+        # 目标：$ x = 5 0 \ % $  -> $ x = 50\% $ (注意保留了 \%)
+        # 目标：5 0 \ %          -> 50% (普通文本)
+        
+        # 这里的逻辑是：只找 "数字+空格+数字... + %"，不关心有没有 $
+        # 但为了安全，如果后面跟的是 \%，我们保留 \%，只去数字空格
+        
+        # 2.1 针对带反斜杠的：5 0 \ % -> 50\% (保留反斜杠，防止公式内注释化)
+        pattern_spaced_latex = r'(\d+(?:\s+\d+)+)\s*(\\%)'
+        text = re.sub(pattern_spaced_latex, lambda m: f"{m.group(1).replace(' ', '')}{m.group(2)}", text)
 
+        # 2.2 针对无反斜杠的：5 0 % -> 50%
+        pattern_spaced_normal = r'(\d+(?:\s+\d+)+)\s*(%)'
+        text = re.sub(pattern_spaced_normal, lambda m: f"{m.group(1).replace(' ', '')}%", text)
+
+        # =========================================================
+        # 3. 纯数字伪影 (你原来的逻辑，这个是安全的)
+        # =========================================================
+        # 只有当 $...$ 内部全是数字和空格时才替换，所以不会误伤 $ 1 + 2 $
+        pattern_pure_num = r'\$\(?\s*(\d+(?:\s+\d+)+)\s*\)?\$'
+        text = re.sub(pattern_pure_num, lambda m: m.group(1).replace(" ", ""), text)
+
+        return text
 
     async def _call_llm(self, system_prompt: str, user_content: str, is_json_mode=True) -> Dict:
         """核心工具方法：统一封装 API 调用"""

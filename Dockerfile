@@ -30,4 +30,4 @@ COPY . .
 
 # 7. 声明启动命令 (根据你的实际启动文件修改，比如 main.py 或 app.py)
 # 假设你的入口文件是 main.py
-CMD ["sh", "-c", "python -m api.table.init_tables -y && python -m api.server.main_server -p 8000"]
+CMD ["sh", "-c", "python -m api.table.init_tables -n && python -m api.server.main_server -p 8000"]

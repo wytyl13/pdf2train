@@ -112,7 +112,7 @@ class ChunkService:
                 progress=ChunkStatus.SUCCESS.value,
                 result_data=result_obj.model_dump(),
             )
-            await self.pipeline_task_service.activate_next_step(doc_id=doc_id, current_step_order=1)
+            await self.pipeline_task_service.activate_next_step(doc_id=doc_id, current_step_order=2)
             self.logger.info(f"🎉 [Doc {doc_id}] 切片入库完成，共 {saved_count} 条")
             return saved_count
 

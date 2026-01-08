@@ -16,6 +16,7 @@ import sys
 
 
 from agent.config.sql_config import SqlConfig
+from agent.provider.sql_provider import SqlProvider
 from api.table.base.base import Base
 from api.table.base.pdf_document import PdfDocument
 from api.table.base.pipeline_task import PipelineTask
@@ -27,6 +28,49 @@ ROOT_DIRECTORY = Path(__file__).parent.parent.parent
 SQL_CONFIG_PATH = str(ROOT_DIRECTORY / "config" / "yaml" / "postgresql.yaml")
 
 sql_config = SqlConfig.from_file(SQL_CONFIG_PATH)
+
+async def check_and_upgrade_tables():
+    """
+    检查现有表结构并执行必要的字段新增操作
+    """
+    print("正在检查表结构变更...")
+    engine = create_async_engine(sql_config.sql_url)
+
+    async with engine.connect() as conn:
+        # 定义需要检查的变更任务
+        # 格式: (表名, 列名, SQL语句)
+        migrations = [
+            (
+                "instruction_datum", 
+                "chunk_index_description", 
+                "ALTER TABLE instruction_datum ADD COLUMN chunk_index_description JSON DEFAULT '[]'::json"
+            ),
+            # 未来如果有其他新增字段，可以继续加在这里
+        ]
+
+        for table, column, sql in migrations:
+            try:
+                # 检查列是否存在
+                # 注意：PostgreSQL 的 information_schema 查询
+                check_sql = text(f"""
+                    SELECT 1 
+                    FROM information_schema.columns 
+                    WHERE table_name = :table_name AND column_name = :column_name
+                """)
+                
+                result = await conn.execute(check_sql, {"table_name": table, "column_name": column})
+                if result.scalar() is None:
+                    print(f"⚠️ 检测到表 {table} 缺少列 {column}，正在添加...")
+                    await conn.execute(text(sql))
+                    await conn.commit() # 提交更改
+                    print(f"✅ 列 {column} 添加成功。")
+                else:
+                    # print(f"表 {table} 已包含列 {column}，无需操作。")
+                    pass
+            except Exception as e:
+                print(f"❌ 检查/更新表 {table} 失败: {e}")
+
+    await engine.dispose()
 
 async def check_tables_exist():
     """检查表是否已存在"""
@@ -107,6 +151,8 @@ async def create_tables_with_check(auto_choice: str = None):
             await drop_all_tables()
             print("正在重新创建表...")
             await create_all_tables()
+            print("正在重新llm默认配置...")
+            await init_default_data()
         else:
             print("保留现有表，仅创建缺失的表...")
             await create_all_tables()
@@ -114,6 +160,37 @@ async def create_tables_with_check(auto_choice: str = None):
     else:
         print("未检测到现有表，开始创建新表...")
         await create_all_tables()
+
+async def init_default_data():
+    """
+    初始化默认数据
+    """
+    print("正在初始化默认 LLM 配置 (DeepSeek-V3)...")
+    
+    default_config = {
+        "name": "DeepSeek-V3",
+        "provider": "DeepSeek",
+        "model_name": "deepseek-chat",
+        "api_key": "sk-d8b7a899050f41c7a3deac1cb149cbb4",
+        "base_url": "https://api.deepseek.com",
+        "is_default": True
+    }
+
+    sql_provider = None
+    try:
+        # 初始化 Provider
+        sql_provider = SqlProvider(model=LLMConfig, sql_config_path=SQL_CONFIG_PATH)
+        
+        # 写入数据
+        await sql_provider.add_record(default_config)
+        print("✅ 默认 LLM 配置写入成功。")
+        
+    except Exception as e:
+        print(f"❌ 初始化默认数据失败: {e}")
+    finally:
+        if sql_provider:
+            await sql_provider.close()
+
 
 async def init_database(auto_choice: str = None):
     """初始化数据库：创建表和默认用户"""
@@ -123,6 +200,8 @@ async def init_database(auto_choice: str = None):
         # 1. 检查并创建表
         await create_tables_with_check(auto_choice=auto_choice)
         
+        # 2. 检查现有表是否缺少字段
+        await check_and_upgrade_tables()
         print("数据库初始化完成！")
     
     except Exception as e:

@@ -50,3 +50,14 @@ pdf2train使用docker公网连接 minio容器
 4、instruction ui中配置新增编辑删除llm_config，每个doc_id选择llm配置（标题生成和指令生成配置），import data卡片的右上角也可以进行选择配置
 5、新增了llm_config配置，各种ui对接
 6、在执行操作的时候，如果用到了某个llm配置，不能修改改配置，否则会产生冲突
+
+# 20251231
+1、instruction 步骤生成的指令数据有待优化，llm请求报错和并发问题，效率太低
+2、新增状态过滤机制
+3、新增dashboard ui
+4、data import界面提pdf2md步骤并发情况下状态更新不及时，需要等待所有提取完成以后一起更新，需要优化
+
+# 20260103
+1、新增chunk_index_description字段，以方便前端显示和documents chunk相对应的chunk编号在instruction gen页面的instruction chunk显示菜单栏
+2、优化instruction生成算法：减少每章生成无法回答的数目（从2减少到1），使用difflib去匹配无法回答的低成本验证（二次低成本验证数据质量，防止rag数据出现幻觉）
+3、其他优化

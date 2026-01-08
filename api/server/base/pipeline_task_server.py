@@ -34,6 +34,21 @@ class TaskUpdateReq(BaseModel):
     error_message: Optional[str] = None
 
 
+class RecentJobItem(BaseModel):
+    """Dashboard 最近任务列表项"""
+    doc_id: int
+    file_name: str
+    create_time: datetime
+    # 整体状态 (用于右侧 Badge: 完成/处理中/失败)
+    global_status: int 
+    # 4个步骤的状态列表 (用于中间的 4 个圆点)
+    # 顺序严格对应: [Extract, Chunk, Instruction, Index]
+    # 值对应 TaskLifecycle: 0(Pending), 10(Running), 100(Success), -1(Failed)
+    steps_status: List[int] 
+    # 耗时 (用于显示 "耗时 3m" 等，可选)
+    cost_seconds: Optional[int] = 0
+
+
 class PipelineTaskServer:
     """流水线任务接口服务"""
 
@@ -49,6 +64,12 @@ class PipelineTaskServer:
         # 内部/外部回调：更新任务状态
         app.post("/api/pipeline/update_status")(self.update_task_status)
 
+        # Dashboard 聚合统计接口
+        app.get("/api/dashboard/stats")(self.get_dashboard_stats)
+        
+        # get recent jobs
+        app.get("/api/dashboard/recent-jobs")(self.get_recent_jobs)
+
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
         return JSONResponse(
             status_code=code,
@@ -61,6 +82,28 @@ class PipelineTaskServer:
         )
 
     # === 接口实现 ===
+    async def get_recent_jobs(self, limit: int = 5):
+        """
+        [GET] 获取最近处理的任务列表 (包含流水线圆点状态)
+        """
+        try:
+            data = await self.service.get_recent_jobs(limit=limit)
+            return self._response(True, "获取最近任务成功", data=data)
+        except Exception as e:
+            self.logger.error(f"获取最近任务失败: {traceback.format_exc()}")
+            return self._response(False, f"获取失败: {str(e)}", code=500)
+    
+    async def get_dashboard_stats(self):
+        """
+        [GET] 获取仪表盘所有统计数据
+        """
+        try:
+            stats = await self.service.get_dashboard_statistics()
+            return self._response(True, "获取统计成功", data=stats)
+        except Exception as e:
+            self.logger.error(f"获取Dashboard数据失败: {traceback.format_exc()}")
+            return self._response(False, f"获取失败: {str(e)}", code=500)
+    
     async def get_tasks_by_doc(self, doc_id: int):
         """
         [GET] 获取指定文档的所有流水线任务状态

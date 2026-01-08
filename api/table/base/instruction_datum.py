@@ -36,14 +36,14 @@ class InstructionDatum(Base):
     system_prompt = Column(Text, nullable=False, comment='系统提示词 (system_prompt)')
     question = Column(Text, nullable=False, comment='指令/问题 (Instruction/Question)')
     answer = Column(Text, nullable=False, comment='回答 (Output)')
-    
+    chunk_index_description = Column(JSON, default=[], comment='引用的Chunk编号描述列表')
     # 思维链 (可选，用于增强检索或训练)
     chain_of_thought = Column(Text, nullable=True, comment='思维链推理过程')
 
     # === 4. 上下文与引用 ===
     # 来源章节标题 (类似 meta_info 中的 H1)
     h1_title = Column(String(512), nullable=True, comment='来源章节标题')
-    
+    type = Column(String(64), default='general', index=True, comment='指令类型 (如: 原理机制/操作指南/概念解释)')
     # 关键引用：记录这条 QA 是依据哪些 DocumentChunk 生成的
     # 存 JSON list: ["uuid-chunk-1", "uuid-chunk-2"]
     ref_chunk_ids = Column(JSON, default=[], comment='引用的 DocumentChunk ID 列表')

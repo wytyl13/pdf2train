@@ -294,6 +294,28 @@ class DocumentChunkService:
             result_data=final_data
         )
 
+    async def get_chunk_index_by_chunk_id(self, chunk_id: str) -> Optional[int]:
+        """
+        [辅助方法] 根据 Chunk ID 快速反查 Document ID
+        用于删除、校验或联动更新
+        """
+        sql_provider = None
+        try:
+            sql_provider = SqlProvider(model=DocumentChunk, sql_config_path=self.sql_config_path)
+            result = await sql_provider.get_record_by_condition(
+                condition={"id": chunk_id},
+                fields=["chunk_index"]
+            )
+            if result:
+                return result[0].get("chunk_index")
+            else:
+                return None
+        except Exception as e:
+            self.logger.error(f"查询 Document ID 失败 (Chunk {chunk_id}): {str(e)}")
+            return None
+        finally:
+            if sql_provider: await sql_provider.close()
+
     async def get_document_id_by_chunk_id(self, chunk_id: str) -> Optional[int]:
         """
         [辅助方法] 根据 Chunk ID 快速反查 Document ID

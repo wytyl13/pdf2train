@@ -93,6 +93,21 @@ class InstructionTaskResult(BaseModel):
     model_name: str = Field(..., description="使用的基座模型名称")
 
 
+class IndexTaskResult(BaseModel):
+    """
+    [Task Result] 向量化/索引任务结果
+    存储于 PipelineTask.result_data
+    """
+    # 成功索引的切片数量
+    indexed_count: int = Field(default=0, description="已成功入库的切片数")
+    
+    # 向量库集合名称 (方便后续查询)
+    collection_name: str = Field(default="knowledge_base", description="Qdrant集合名称")
+    
+    # 嵌入模型名称
+    embedding_model: str = Field(default="bge-m3", description="使用的Embedding模型")
+
+
 @unique
 class TaskType(IntEnum):
     """任务类型定义"""
@@ -153,11 +168,12 @@ class InstructionStatus(IntEnum):
 # 步骤 4 专属状态
 class IndexStatus(IntEnum):
     PENDING = 0
-    BATCHING = 10
-    UPSERTING = 20
+    DATA_PREPARING = 10
+    BATCH_UPSERTING = 20
     SUCCESS = 100
     FAILED = -1
-    
+
+
     
 class PipelineTask(Base):
     """

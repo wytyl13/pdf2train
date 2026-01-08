@@ -81,6 +81,8 @@ class LLMConfigServer:
         
         app.post("/api/llm_config/get_config_by_doc_id")(self.get_config_by_doc_id)
 
+        app.post("/api/llm_config/provider_list")(self.get_provider_list)
+
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
         return JSONResponse(
             status_code=code,
@@ -93,6 +95,15 @@ class LLMConfigServer:
         )
 
     # === 接口实现 ===
+
+    async def get_provider_list(self):
+        """获取支持的 LLM 提供商列表"""
+        try:
+            providers = self.service.get_provider_list()
+            return self._response(True, "查询成功", providers)
+        except Exception as e:
+            self.logger.error(f"查询提供商列表失败: {traceback.format_exc()}")
+            return self._response(False, f"查询失败: {str(e)}", code=500)
 
     async def create_config(self, request: LLMConfigCreateRequest):
         """创建新配置"""

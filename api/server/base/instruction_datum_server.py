@@ -26,6 +26,8 @@ from api.service.instruction_datum_service import InstructionDatumService
 class InstructionListRequest(BaseModel):
     """查询指令列表请求"""
     doc_id: int = Field(..., description="文档ID")
+    type: Optional[str] = Field(None, description="指令类型")
+    is_valid: Optional[int] = Field(None, description="审核状态: 1有效, -1无效/废弃")
     page: int = 1
     page_size: int = 20
     keyword: Optional[str] = None
@@ -131,6 +133,8 @@ class InstructionDatumServer:
         try:
             result = await self.service.get_instruction_list(
                 doc_id=request.doc_id,
+                type=request.type,
+                is_valid=request.is_valid,
                 page=request.page,
                 page_size=request.page_size,
                 keyword=request.keyword

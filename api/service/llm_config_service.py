@@ -16,11 +16,15 @@ from api.table.base.llm_enum import LLMProvider
 from agent.provider.sql_provider import SqlProvider
 
 from api.table.base.pdf_document import PdfDocument
+from api.table.base.llm_enum import LLMProvider
 
 class LLMConfigService:
     def __init__(self, sql_config_path: str):
         self.sql_config_path = sql_config_path
         self.logger = logging.getLogger(self.__class__.__name__)
+
+    def get_provider_list(self) -> List[str]:
+        return [provider.value for provider in LLMProvider]
 
     async def get_config_by_doc_id(self, doc_id: int, field_llm_name: str):
         sql_provider = None

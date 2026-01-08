@@ -8,7 +8,9 @@
 
 import logging
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import defaultdict
+from sqlalchemy import select, func, desc, case
 
 # 导入模型和枚举
 from api.table.base.pipeline_task import PipelineTask, TaskType, TaskLifecycle
@@ -106,7 +108,7 @@ class PipelineTaskService:
             # 2. 准备更新数据
             update_data = {
                 "status": status,
-                "update_time": datetime.now()
+                "end_time": datetime.now()
             }
             
             # 2.1 状态流转处理
@@ -187,7 +189,7 @@ class PipelineTaskService:
             if next_task.get("status") == TaskLifecycle.WAITING_PARENT.value:
                 await task_provider.update_record(next_task.get("id"), {
                     "status": TaskLifecycle.PENDING.value,
-                    "update_time": datetime.now()
+                    "end_time": datetime.now()
                 })
                 self.logger.info(f"已自动激活步骤 {next_order} (Task ID: {next_task.get('id')})")
                 return True
@@ -287,3 +289,306 @@ class PipelineTaskService:
                     self.logger.info(f"已清理中间文件: {bucket}/{path}")
                 except Exception as ex:
                     self.logger.warning(f"清理文件失败: {ex}")
+                    
+    
+    # === Dashboard 核心统计逻辑 ===
+    async def get_recent_jobs(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        [Dashboard] 获取最近处理的任务列表 (按任务活跃时间倒序)
+        逻辑：
+        1. 查 PipelineTask 表最近的 N 条记录
+        2. 提取不重复的 doc_id (保持时间顺序)
+        3. 根据 doc_id 查 PdfDocument 信息
+        4. 聚合数据返回
+        """
+        task_provider = None
+        doc_provider = None
+        
+        try:
+            # === Step 1: 找出最近活跃的文档 ID ===
+            # 我们不知道最近的5个文档产生了多少条任务日志，所以这里扩大采样范围 (比如取 50 条)
+            # 这样能保证即使一个文档有 10 个步骤，我们也能覆盖到足够多的不同文档
+            sample_size = limit * 10 
+            
+            task_provider = SqlProvider(model=PipelineTask, sql_config_path=self.sql_config_path)
+            
+            # 使用 get_records_paginated 按 ID 倒序 (ID越大代表越新，比时间更准且有索引)
+            # 或者用 order_by=PipelineTask.create_time.desc()
+            recent_tasks_data = await task_provider.get_records_paginated(
+                page=1,
+                page_size=sample_size,
+                fields=["doc_id"], # 我们只需要 doc_id，减少数据传输
+                order_by=PipelineTask.id.desc() 
+            )
+            
+            # 内存去重，保持顺序
+            recent_doc_ids = []
+            seen_ids = set()
+            for item in recent_tasks_data.get("items", []):
+                did = item.get("doc_id")
+                if did and did not in seen_ids:
+                    recent_doc_ids.append(did)
+                    seen_ids.add(did)
+                
+                # 只要凑够了 limit 个就不找了
+                if len(recent_doc_ids) >= limit:
+                    break
+            
+            if not recent_doc_ids:
+                return []
+
+            # === Step 2: 查询这些文档的详情 (PdfDocument) ===
+            doc_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
+            
+            # 这里不能简单的用 pagination，因为我们要查指定的 ID 列表
+            # 使用 session 手动查询，或者如果你的 get_record_by_condition 支持 in_
+            docs_list = []
+            async with doc_provider.get_db_session() as session:
+                # SELECT * FROM pdf_document WHERE id IN (...)
+                stmt = select(PdfDocument).where(PdfDocument.id.in_(recent_doc_ids))
+                res = await session.execute(stmt)
+                docs_objects = res.scalars().all()
+                # 转字典
+                docs_list = [
+                    {k: v for k, v in d.__dict__.items() if not k.startswith('_sa_')}
+                    for d in docs_objects
+                ]
+
+            # ⚠️ 重要：数据库 IN 查询返回的顺序是不固定的，我们需要按 recent_doc_ids 的顺序重新排列
+            # 构建一个 lookup map
+            doc_map_by_id = {d["id"]: d for d in docs_list}
+            ordered_docs = []
+            for did in recent_doc_ids:
+                if did in doc_map_by_id:
+                    ordered_docs.append(doc_map_by_id[did])
+
+            # === Step 3: 再次查询这些文档的所有任务状态 (用于画那4个圆点) ===
+            # 这次我们已经确定了 doc_ids，可以直接查
+            all_tasks_for_status = []
+            async with task_provider.get_db_session() as session:
+                stmt = select(PipelineTask).where(PipelineTask.doc_id.in_(recent_doc_ids))
+                res = await session.execute(stmt)
+                tasks_objs = res.scalars().all()
+                all_tasks_for_status = [
+                    {k: v for k, v in t.__dict__.items() if not k.startswith('_sa_')}
+                    for t in tasks_objs
+                ]
+
+            # === Step 4: 组装最终数据 (这部分逻辑和之前一样) ===
+            task_status_map = defaultdict(dict)
+            for t in all_tasks_for_status:
+                task_status_map[t.get("doc_id")][t.get("task_type")] = t.get("status")
+
+            ordered_steps = [
+                TaskType.MINERU_EXTRACT.value,
+                TaskType.MARKDOWN_CHUNK.value,
+                TaskType.INSTRUCTION_GEN.value,
+                TaskType.QDRANT_INDEX.value
+            ]
+
+            result_list = []
+            for doc in ordered_docs:
+                doc_id = doc["id"]
+                current_steps = []
+                statuses = task_status_map.get(doc_id, {})
+                
+                for step_type in ordered_steps:
+                    current_steps.append(statuses.get(step_type, TaskLifecycle.PENDING.value))
+
+                item = {
+                    "doc_id": doc_id,
+                    "file_name": doc.get("file_name") or doc.get("object_name"),
+                    "create_time": doc.get("create_time"),
+                    "global_status": doc.get("status"),
+                    "steps_status": current_steps
+                }
+                result_list.append(item)
+
+            return result_list
+
+        except Exception as e:
+            self.logger.error(f"获取最近任务失败: {e}")
+            # 打印堆栈以便调试
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return []
+        finally:
+            # 关闭 provider
+            if task_provider: await task_provider.close()
+            if doc_provider: await doc_provider.close()
+    
+    
+    
+    async def get_dashboard_statistics(self) -> Dict[str, Any]:
+        """
+        [Dashboard] 获取仪表盘所需的所有统计数据
+        聚合了：流水线监控、耗时分析、产出趋势
+        """
+        sql_provider = None
+        try:
+            sql_provider = SqlProvider(model=PipelineTask, sql_config_path=self.sql_config_path)
+            
+            # 并行查询三个部分的数据 (为了代码简单，这里串行写，实际可用 asyncio.gather)
+            monitor_data = await self._get_pipeline_monitor_stats(sql_provider)
+            latency_data = await self._get_step_latency_stats(sql_provider)
+            trend_data = await self._get_daily_production_trend(sql_provider)
+            
+            return {
+                "pipeline_monitor": monitor_data,
+                "step_latency": latency_data,
+                "production_trend": trend_data
+            }
+        except Exception as e:
+            self.logger.error(f"Dashboard统计失败: {e}")
+            raise e
+        finally:
+            if sql_provider: await sql_provider.close()
+
+    async def _get_pipeline_monitor_stats(self, provider: SqlProvider) -> Dict[str, Dict[str, Any]]:
+        """
+        [Part 1] 流水线实时监控：运行中、等待中、平均耗时
+        """
+        # 初始化默认结构
+        stats = {
+            str(t.value): {"running": 0, "pending": 0, "avg_time_s": 0} 
+            for t in TaskType
+        }
+
+        async with provider.get_db_session() as session:
+            # 1.1 状态计数 (Running & Pending)
+            stmt_count = (
+                select(PipelineTask.task_type, PipelineTask.status, func.count(PipelineTask.id))
+                .where(PipelineTask.status.in_([TaskLifecycle.PENDING.value, TaskLifecycle.RUNNING.value]))
+                .group_by(PipelineTask.task_type, PipelineTask.status)
+            )
+            result_count = await session.execute(stmt_count)
+            for task_type, status, count in result_count.all():
+                key = str(task_type)
+                if key in stats:
+                    if status == TaskLifecycle.RUNNING.value:
+                        stats[key]["running"] = count
+                    elif status == TaskLifecycle.PENDING.value:
+                        stats[key]["pending"] = count
+
+            # 1.2 平均耗时 (基于 cost_ms 字段)
+            # 取最近成功的 500 条任务计算平均值
+            stmt_avg = (
+                select(PipelineTask.task_type, func.avg(PipelineTask.cost_ms))
+                .where(PipelineTask.status == TaskLifecycle.SUCCESS.value)
+                .where(PipelineTask.cost_ms > 0) # 排除异常数据
+                .group_by(PipelineTask.task_type)
+            )
+            result_avg = await session.execute(stmt_avg)
+            for task_type, avg_ms in result_avg.all():
+                key = str(task_type)
+                if key in stats and avg_ms:
+                    stats[key]["avg_time_s"] = int(avg_ms / 1000)
+
+        return stats
+
+    async def _get_step_latency_stats(self, provider: SqlProvider) -> Dict[str, Dict[str, int]]:
+        """
+        [Part 2] 步骤耗时分析：平均耗时 vs 最大耗时
+        """
+        stats = {}
+        async with provider.get_db_session() as session:
+            # 查询每种任务类型的 avg 和 max cost_ms
+            stmt = (
+                select(
+                    PipelineTask.task_type, 
+                    func.avg(PipelineTask.cost_ms).label("avg_ms"), 
+                    func.max(PipelineTask.cost_ms).label("max_ms")
+                )
+                .where(PipelineTask.status == TaskLifecycle.SUCCESS.value)
+                .where(PipelineTask.cost_ms > 0)
+                .group_by(PipelineTask.task_type)
+            )
+            result = await session.execute(stmt)
+            
+            for task_type, avg_ms, max_ms in result.all():
+                # 转换成秒
+                stats[str(task_type)] = {
+                    "avg_time_s": int(avg_ms / 1000) if avg_ms else 0,
+                    "max_time_s": int(max_ms / 1000) if max_ms else 0
+                }
+        
+        # 补全缺失的类型
+        for t in TaskType:
+            if str(t.value) not in stats:
+                stats[str(t.value)] = {"avg_time_s": 0, "max_time_s": 0}
+                
+        return stats
+
+    async def _get_daily_production_trend(self, provider: SqlProvider) -> Dict[str, List[int]]:
+        """
+        [Part 3] 每日产出趋势 (最近7天)
+        统计维度：
+        1. 上传文档数 (Step 1 成功数)
+        2. QA 指令数 (Step 3 成功且有产出)
+        3. 向量切片数 (Step 2/4 成功且有产出)
+        """
+        # 生成最近7天的日期列表 (MM-DD)
+        today = datetime.now().date()
+        date_list = [(today - timedelta(days=i)) for i in range(6, -1, -1)]
+        date_str_list = [d.strftime("%m-%d") for d in date_list]
+        
+        # 初始化结果结构
+        trend = {
+            "dates": date_str_list,
+            "docs": [0] * 7,
+            "qa_pairs": [0] * 7,
+            "vectors": [0] * 7
+        }
+
+        async with provider.get_db_session() as session:
+            # 查最近7天的所有成功任务
+            start_date = date_list[0]
+            stmt = (
+                select(
+                    func.date(PipelineTask.end_time).label("date"),
+                    PipelineTask.task_type,
+                    PipelineTask.result_data # 需要解析 result_data 里的 count
+                )
+                .where(PipelineTask.status == TaskLifecycle.SUCCESS.value)
+                .where(PipelineTask.end_time >= start_date)
+            )
+            
+            result = await session.execute(stmt)
+            
+            # 内存聚合 (因为 result_data 是 JSON，SQL 直接 sum 比较麻烦)
+            temp_agg = defaultdict(lambda: {"docs": 0, "qa": 0, "vec": 0})
+            
+            for row_date, task_type, result_json in result.all():
+                if not row_date: continue
+                # date对象转字符串 key
+                d_key = row_date.strftime("%m-%d")
+                
+                # 1. 上传文档 (Step 1 MINERU_EXTRACT)
+                if task_type == TaskType.MINERU_EXTRACT.value:
+                    temp_agg[d_key]["docs"] += 1
+                
+                # 2. QA 对 (Step 3 INSTRUCTION_GEN)
+                elif task_type == TaskType.INSTRUCTION_GEN.value:
+                    # 从 JSON 中取 total_count
+                    count = 0
+                    if result_json and isinstance(result_json, dict):
+                        count = result_json.get("total_count", 0)
+                    temp_agg[d_key]["qa"] += count
+                
+                # 3. 向量/切片 (Step 2 MARKDOWN_CHUNK)
+                elif task_type == TaskType.MARKDOWN_CHUNK.value:
+                    # 从 JSON 中取 chunk_count
+                    count = 0
+                    if result_json and isinstance(result_json, dict):
+                        count = result_json.get("chunk_count", 0)
+                    temp_agg[d_key]["vec"] += count
+
+            # 填回数组
+            for i, d_str in enumerate(date_str_list):
+                if d_str in temp_agg:
+                    trend["docs"][i] = temp_agg[d_str]["docs"]
+                    trend["qa_pairs"][i] = temp_agg[d_str]["qa"]
+                    trend["vectors"][i] = temp_agg[d_str]["vec"]
+
+        return trend              
+    

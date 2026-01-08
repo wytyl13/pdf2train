@@ -65,12 +65,14 @@ class InstructionDatumService:
                     "id": item.get("id"),
                     "doc_id": item["doc_id"],
                     "task_id": item["task_id"],
+                    "type": item.get("type", "原理机制"),
                     "h1_title": item.get("h1_title"),
                     "system_prompt": item.get("system_prompt"),
                     "question": item["question"],
                     "answer": item["answer"],
                     "chain_of_thought": item.get("chain_of_thought"),
                     "ref_chunk_ids": item.get("ref_chunk_ids", {}),
+                    "chunk_index_description": item.get("chunk_index_description", []),
                     "meta_info": item.get("meta_info", {}),
                     "is_indexed": False,
                     # 默认设为 0 (待审核)
@@ -148,28 +150,37 @@ class InstructionDatumService:
                 instruction = get_val(row, "system_prompt")
                 question = get_val(row, "question")
                 answer = get_val(row, "answer")
+                cot = get_val(row, "chain_of_thought")
                 ref_ids = get_val(row, "ref_chunk_ids") or []
                 
                 if not question or not answer: continue
-
-                context_texts = []
-                for rid in ref_ids:
-                    content = chunk_map.get(str(rid))
-                    if content:
-                        context_texts.append(content)
                 
-                context_block = "\n\n".join(context_texts)
-                
-                if context_block:
-                    user_content = f"【参考资料】\n{context_block}\n\n【问题】\n{question}"
-                else:
+                if not ref_ids:
+                    # 场景 A: 知识内化 / 通用问答
                     user_content = question
-
+                else:
+                    context_texts = []
+                    for rid in ref_ids:
+                        content = chunk_map.get(str(rid))
+                        if content:
+                            context_texts.append(content)
+                    
+                    context_block = "\n\n".join(context_texts)
+                    
+                    if context_block:
+                        user_content = f"【参考资料】\n{context_block}\n\n【问题】\n{question}"
+                    else:
+                        user_content = question
+                if cot:
+                    # 格式：<思考过程> \n\n <最终答案>
+                    final_assistant_content = f"<thought>{cot}</thought>\n\n{answer}"
+                else:
+                    final_assistant_content = answer
                 record = {
                     "messages": [
                         {"role": "system", "content": instruction},
                         {"role": "user", "content": user_content},
-                        {"role": "assistant", "content": answer}
+                        {"role": "assistant", "content": final_assistant_content}
                     ]
                 }
                 export_data.append(record)
@@ -273,12 +284,16 @@ class InstructionDatumService:
         finally:
             if sql_provider: await sql_provider.close()
 
-    async def get_instruction_list(self, doc_id: int, page: int = 1, page_size: int = 20, keyword: Optional[str] = None):
+    async def get_instruction_list(self, doc_id: int, type: int, is_valid, page: int = 1, page_size: int = 20, keyword: Optional[str] = None):
         """查询列表 (包含 is_valid 状态，方便前端展示状态颜色)"""
         sql_provider = None
         try:
             sql_provider = SqlProvider(model=InstructionDatum, sql_config_path=self.sql_config_path)
             condition = {"doc_id": doc_id}
+            if type:
+                condition["type"] = type
+            if is_valid is not None:
+                condition["is_valid"] = is_valid
             filters = []
             if keyword:
                 filters.append(or_(
@@ -288,12 +303,14 @@ class InstructionDatumService:
             fields = [
                 "id", 
                 "h1_title", 
+                "type",
                 "system_prompt",
                 "question", 
                 "answer", 
                 "chain_of_thought", 
                 "meta_info",
                 "ref_chunk_ids",
+                "chunk_index_description",
                 "is_valid", 
                 "create_time"
             ]

@@ -26,7 +26,7 @@ class HybridMarkdownParser(NodeParser):
     min_content_length: int = Field(default=50, description="过滤阈值，低于此长度的内容将被丢弃")
     _image_pattern: re.Pattern = PrivateAttr()
     
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50, min_content_length: int = 30, **kwargs):
+    def __init__(self, chunk_size: int = 900, chunk_overlap: int = 90, min_content_length: int = 90, **kwargs):
         text_splitter = SentenceSplitter(
             chunk_size=chunk_size, 
             chunk_overlap=chunk_overlap
@@ -48,6 +48,56 @@ class HybridMarkdownParser(NodeParser):
             all_nodes.extend(nodes)
         return all_nodes
 
+    def _split_text_keep_lines(self, text: str) -> List[str]:
+        """
+        替代 SentenceSplitter。
+        逻辑：按行累加，不超过 chunk_size；切分时保留末尾做 overlap。
+        """
+        # 从 text_splitter 获取配置，保持参数一致
+        limit = self.text_splitter.chunk_size
+        overlap = self.text_splitter.chunk_overlap
+        
+        lines = text.split('\n')
+        chunks = []
+        current_buf = []
+        current_len = 0
+        
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            
+            line_len = len(line)
+            
+            # 如果加上这一行会超标，且缓存区不为空 -> 切分
+            if current_len + line_len > limit and current_buf:
+                # 1. 保存当前块
+                chunks.append("\n".join(current_buf))
+                
+                # 2. 处理 Overlap (回退逻辑)
+                # 从当前缓存的末尾往回找，凑够 overlap 长度保留下来
+                overlap_buf = []
+                overlap_len = 0
+                for old_line in reversed(current_buf):
+                    if overlap_len + len(old_line) > overlap:
+                        break
+                    overlap_buf.insert(0, old_line) # 插到头部恢复顺序
+                    overlap_len += len(old_line)
+                
+                # 3. 重置缓存：Overlap内容 + 当前新行
+                current_buf = overlap_buf
+                current_buf.append(line)
+                current_len = overlap_len + line_len
+            else:
+                # 没超标，直接加
+                current_buf.append(line)
+                current_len += line_len
+                
+        # 处理最后剩下的
+        if current_buf:
+            chunks.append("\n".join(current_buf))
+            
+        return chunks
+
     def _parse_single_doc(self, doc: Document) -> List[TextNode]:
         text = doc.text
         filename = doc.metadata.get("file_name", "unknown")
@@ -63,12 +113,106 @@ class HybridMarkdownParser(NodeParser):
             content_text = "\n".join(current_content).strip()
             if not content_text: return
 
+            # 过滤参考文献逻辑
+            # 1. 获取当前 H1 标题
+            h1_title = current_headers.get(1, "")
+            
+            # 2. 预处理：去除所有空白字符（空格、制表符等）并转为小写
+            clean_h1 = re.sub(r'\s+', '', h1_title).lower()
+            
+            
+            # 3.1 第一道防线：标题黑名单 (增加 '目录', 'contents')
+            if re.match(r'^(?:(?:主要)?(?:[参參]考(?:文献|文件|资料)|引用文献)|目录|references?|bibliography)$', clean_h1):
+                return
+
+
+            # 3.2 第三道防线：目录格式检测、冒牌前言检测 (内容里有多行符合目录格式)
+            preview_lines = [l.strip() for l in content_text.split('\n') if l.strip()][:15] # 采样前15行
+            
+            # [正则定义] 
+            # 1. 旧版：匹配 "... 123" 或 "   123" 结尾
+            toc_line_pattern = re.compile(r'[\.…·\s]\s*\d+\s*(?:[^\u4e00-\u9fa5a-zA-Z0-9])?$')
+            # 2. [新增] 括号页码：匹配 "(123)" 或 "（123）"
+            bracket_page_pattern = re.compile(r'[（\(]\s*\d+\s*[）\)]')
+            
+            is_preface_title = re.match(r'^(?:前言|preface|序言)$', clean_h1)
+
+            match_count = 0
+            processed_count = 0
+            for line in preview_lines:
+                processed_count += 1
+            
+                # 判定当前行是否为目录行
+                if len(line) > 3 and toc_line_pattern.search(line):
+                    match_count += 1
+
+                # --- 实时阻断检查 ---
+                
+                # 规则1: 冒牌前言检测 (最严格)
+                if is_preface_title and match_count >= 2:
+                    return
+
+                # 规则2: 高密度目录检测
+                if processed_count >= 3:
+                    current_density = match_count / processed_count
+                    if current_density > 0.6:
+                        return
+
+            # ================= [新增逻辑开始：存活文本的深度清洗] =================
+            # 到了这一步，说明这块文本被认为是“正文”（如前言、综述）。
+            # 但里面可能夹杂了“一、构造异构 (194) ...” 这种内联目录，需要精准剔除。
+
+            # 定义 TOC 关键词（开头是数字编号、章节、习题等）
+            toc_start_keywords = re.compile(r'^(?:第[一二三四五六七八九十\d]+[章节篇]|习题|小结|复习|思考|附录|参考文献|References|Contents|Chapter|Section|\d+\.\d+|[一二三四五六七八九十]、)')
+            
+            raw_lines = content_text.split('\n')
+            clean_lines = []
+            
+            for line in raw_lines:
+                stripped = line.strip()
+                if not stripped:
+                    clean_lines.append(line)
+                    continue
+
+                # --- 清洗策略 A: 内联多项目录 (High Confidence) ---
+                # 特征：一行内出现 >= 2 个 "(数字)"
+                # 例子: "一、构造异构 (194) 二、立体异构 (194)"
+                if len(bracket_page_pattern.findall(stripped)) >= 2:
+                    continue
+
+                # --- 清洗策略 B: 括号页码结尾 (Medium Confidence) ---
+                # 特征：以 "(数字)" 结尾，并且具备目录特征（关键词开头 或 含虚线）
+                # 例子: "7.1 异构体的分类... (194)" 或 "习题...... (190)"
+                if bracket_page_pattern.search(stripped[-10:]): # 仅检查末尾10个字符是否有括号数字
+                    # 如果包含虚线 "..." 或 "…"
+                    if re.search(r'(\.{3,}|…{2,})', stripped):
+                        continue
+                    # 或者 如果以目录关键词开头
+                    if toc_start_keywords.match(stripped):
+                        continue
+                
+                # --- 清洗策略 C: 传统无括号目录 (Legacy) ---
+                # 特征：利用之前的 toc_line_pattern 清除 "...... 123"
+                if len(stripped) > 3 and toc_line_pattern.search(stripped):
+                    # 双重确认：包含虚线 或 关键词，防止误删 "In 1999" 这种年份结尾的句子
+                    if re.search(r'(\.{3,}|…{2,})', stripped) or toc_start_keywords.match(stripped):
+                        continue
+
+                clean_lines.append(line)
+
+            # 重组清洗后的文本
+            content_text = "\n".join(clean_lines).strip()
+            
+            # 如果洗完发现空了，直接返回
+            if not content_text: return
+            # ================= [新增逻辑结束] =================
+
+
             # === 1. 智能提取图片与图注 ===
             extracted_images, cleaned_text = self._extract_images_smart(content_text)
             
             # --- 过滤逻辑 3: 字数阈值控制 ---
             # 规则：如果纯文本长度 < 30，且没有图片，则视为无意义，丢弃。
-            # (如果有图片，即使字数少也得保留，因为可能是图注)
             if len(cleaned_text) < self.min_content_length and not extracted_images:
                 return
             
@@ -96,7 +240,8 @@ class HybridMarkdownParser(NodeParser):
             # 情况 B: 文本太长，进行二次切分 (Chunking)
             else:
                 # split_text 会按句子智能切分，并处理重叠(overlap)
-                sub_chunks = self.text_splitter.split_text(cleaned_text)
+                # sub_chunks = self.text_splitter.split_text(cleaned_text)
+                sub_chunks = self._split_text_keep_lines(cleaned_text)
                 
                 for i, chunk_text in enumerate(sub_chunks):
                     # 复制一份元数据，防止引用污染

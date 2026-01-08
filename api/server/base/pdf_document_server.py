@@ -7,13 +7,15 @@
 """
 
 from fastapi import FastAPI, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime
 import logging
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from fastapi.encoders import jsonable_encoder
 import traceback
+import urllib.parse
+from io import StringIO
 
 
 # 导入刚才写的 Service
@@ -54,8 +56,8 @@ class PdfDocRequest(BaseModel):
     page: int = 1, 
     page_size: int = 6
     keyword: Optional[str] = None
-    
-    
+
+
 class ContentSaveRequest(BaseModel):
     doc_id: int
     content: str
@@ -83,6 +85,7 @@ class PdfDocumentServer:
         app.get("/api/pdf_document/content")(self.get_doc_content)
         app.get("/api/pdf_document/original_chunk/content")(self.get_original_chunk_content)
         app.post("/api/pdf_document/content/save")(self.save_doc_content)
+        app.post("/api/pdf_document/export_books_jsonl")(self.export_books_jsonl)
 
     # === 辅助方法：生成统一响应 ===
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
@@ -144,6 +147,38 @@ class PdfDocumentServer:
             self.logger.error(f"查询接口异常: {str(e)}")
             return self._response(False, f"查询失败: {str(e)}", code=500)
 
+
+    async def export_books_jsonl(
+        self,
+        request: PdfDocRequest = None,
+    ):
+        """
+        API 接口：下载 JSONL 格式的书籍清单
+        """
+        # 1. 获取 JSONL 字符串内容
+        jsonl_content = await self.pdf_document_service.export_books_jsonl(
+            filter_step_type=request.filter_step_type,
+            filter_step_status=request.filter_step_status,
+            keyword=request.keyword
+        )
+        
+        # 2. 构造文件名 (URL 编码防止中文乱码)
+        filename = "书籍清单_export.jsonl"
+        encoded_filename = urllib.parse.quote(filename)
+        
+        # 3. 创建内存流
+        stream = StringIO(jsonl_content)
+        
+        # 4. 返回流式响应，触发下载
+        return StreamingResponse(
+            stream,
+            media_type="application/x-ndjson", # JSONL 标准 MIME 类型
+            headers={
+                "Content-Disposition": f"attachment; filename*=utf-8''{encoded_filename}"
+            }
+        )
+
+    
 
     async def get_statistics(self):
         """GET 获取文档统计概览"""

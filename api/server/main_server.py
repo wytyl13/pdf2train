@@ -28,6 +28,8 @@ from api.service.chunk_service import ChunkService
 from api.service.instruction_gen_service import InstructionGenService
 from api.service.instruction_datum_service import InstructionDatumService
 from api.service.llm_config_service import LLMConfigService
+from api.service.embedding_service import EmbeddingService
+from api.service.search_service import SearchService
 
 # 导入各个服务类
 from api.server.base.minio_server import MinioServer
@@ -40,6 +42,7 @@ from api.server.base.chunk_server import ChunkServer
 from api.server.base.instruction_gen_server import InstructionGenServer
 from api.server.base.instruction_datum_server import InstructionDatumServer
 from api.server.base.llm_config_server import LLMConfigServer
+from api.server.base.embedding_server import EmbeddingServer
 
 from tool.h1_context_assembler import H1ContextAssembler
 from tool.instruction_llm_generator import InstructionLLMGenerator
@@ -107,20 +110,22 @@ class AeroSenseMainServer:
             minio_service=self.minio_service
         )
         self.instruction_llm_generator = InstructionLLMGenerator(
-            client=OpenAI(
-                api_key="sk-d8b7a899050f41c7a3deac1cb149cbb4", 
-                base_url="https://api.deepseek.com"
-            ),
-            model_name="deepseek-chat",
             llm_config_service=self.llm_config_service
         )
         self.instruction_gen_service = InstructionGenService(
             assembler=H1ContextAssembler(),
             document_chunk_service=self.document_chunk_service,
             instruction_llm_generator=self.instruction_llm_generator,
+            llm_config_service=self.llm_config_service,
             instruction_datum_service=self.instruction_datum_service,
             pipeline_task_service=self.task_service
         )
+        self.embedding_service = EmbeddingService(
+            sql_config_path=self.sql_config_path,
+            document_chunk_service=self.document_chunk_service,
+            pipeline_task_service=self.task_service,
+        )
+        self.search_service = SearchService()
         
         
         # 初始化各个服务
@@ -133,6 +138,7 @@ class AeroSenseMainServer:
         self.instruction_gen_server = InstructionGenServer(instruction_gen_service=self.instruction_gen_service)
         self.instruction_datum_server = InstructionDatumServer(instruction_datum_service=self.instruction_datum_service)
         self.llm_config_server = LLMConfigServer(llm_config_service=self.llm_config_service)
+        self.embedding_server = EmbeddingServer(embedding_service=self.embedding_service, search_service=self.search_service)
         
         # 设置应用
         self._setup_middleware()
@@ -185,6 +191,7 @@ class AeroSenseMainServer:
         self.instruction_gen_server.register_routes(self.app)
         self.instruction_datum_server.register_routes(self.app)
         self.llm_config_server.register_routes(self.app)
+        self.embedding_server.register_routes(self.app)
 
     def run(
         self, 

@@ -211,49 +211,51 @@ class Pdf2MdService:
         # 3. 返回 目录路径 和 MD文件路径
         return extracted_path, final_md_path
 
-    # --- 步骤 3: 合并 ---
-    async def _merge_results(
-        self, 
-        doc_id,
-        task_dir, 
-        chunk_results, 
-        final_name,
-        img_bucket_name,
-    ):
-        """
-        合并md结果
-        合并完成以后：
-            1 md内容格式清洗
-            2 格式化图像链接
-        
-        """
-        final_out_dir = os.path.join(task_dir, "final_output")
-        os.makedirs(final_out_dir, exist_ok=True)
-        
+
+    def _sync_merge_and_replace(self, chunk_results, img_bucket_name):
         full_md_content = []
+        minio_base = self.pdf_document_service.minio_base_url
         
         for item in chunk_results:
             md_file = item["md_file"]
             current_img_prefix = item["img_prefix"]
             if not md_file or not os.path.exists(md_file): continue
+            
+            # [阻塞操作] 读文件
             with open(md_file, "r", encoding="utf-8") as f:
                 content = f.read()
-            current_base_url = f"{self.pdf_document_service.minio_base_url}/{img_bucket_name}/{current_img_prefix}/"
-        
+            
+            current_base_url = f"{minio_base}/{img_bucket_name}/{current_img_prefix}/"
+            
             def replace_link(match):
                 alt_text = match.group(1)
-                raw_path = match.group(2) # images/pic.jpg
-                img_filename = os.path.basename(raw_path) # pic.jpg
+                raw_path = match.group(2)
+                img_filename = os.path.basename(raw_path)
                 return f"![{alt_text}]({current_base_url}{img_filename})"
 
+            # [阻塞操作] 正则替换 (CPU密集)
             pattern = r'!\[(.*?)\]\((.*?)\)'
             content = re.sub(pattern, replace_link, content)
-            # 添加到总列表中
+            
             full_md_content.append(content)
             full_md_content.append("\n\n")
+            
+        return "".join(full_md_content)
+    
+
+    # --- 步骤 3: 合并 ---
+    async def _merge_results(self, doc_id, task_dir, chunk_results, final_name, img_bucket_name):
+        final_out_dir = os.path.join(task_dir, "final_output")
+        os.makedirs(final_out_dir, exist_ok=True)
         
-        # 4. 整体清洗 (移除多余换行等)
-        merged_text = "".join(full_md_content)
+        # 这样在合并的时候，FastAPI 依然可以响应其他请求，数据库也能更新
+        merged_text = await self._run_async(
+            self._sync_merge_and_replace, 
+            chunk_results, 
+            img_bucket_name
+        )
+        
+        # MarkdownCleaner 内部已经是 async 的了，且调用了 LLM API，不会阻塞本地 CPU
         markdown_cleaner = MarkdownCleaner(
             file_path=merged_text,
             llm_config_service=self.llm_config_service,
@@ -261,12 +263,17 @@ class Pdf2MdService:
         )
         cleaned_text = await markdown_cleaner.run()
 
-        # 5. 写入
+        # 写文件也放入线程池
         final_md_path = os.path.join(final_out_dir, f"{final_name}.md")
-        with open(final_md_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_text)
+        
+        def save_file():
+            with open(final_md_path, "w", encoding="utf-8") as f:
+                f.write(cleaned_text)
+                
+        await self._run_async(save_file)
             
         return final_md_path
+
 
     # --- 主流程入口 ---
     async def process_pdf_pipeline(

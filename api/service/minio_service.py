@@ -337,6 +337,11 @@ class MinioService:
         返回字典的 Key 尽量遵循 MinIO Header 规范 (kebab-case)
         """
         metadata = {}
+        def clean_str(text):
+            if not text:
+                return None
+            # 【关键修改】移除 \x00 空字节，并去除首尾空格
+            return str(text).replace('\x00', '').strip()
         try:
             with io.BytesIO(file_data) as stream:
                 reader = PdfReader(stream)
@@ -351,16 +356,16 @@ class MinioService:
                     # 作者 (对应 DB: author)
                     if info.author:
                         # 简单清洗，去除空字符
-                        metadata["author"] = str(info.author).strip()
+                        metadata["author"] = clean_str(info.author)
                     
                     # 标题 (对应 DB: original_title)
                     # MinIO 推荐用 original-title, 数据库用 original_title
                     if info.title:
-                        metadata["original-title"] = str(info.title).strip()
+                        metadata["original-title"] = clean_str(info.title)
 
                     # 我们可以把 Creator 放在 extra_data 里，这里先提取出来
                     if info.creator:
-                        metadata["creator"] = str(info.creator).strip()
+                        metadata["creator"] = clean_str(info.creator)
 
             self.logger.info(f"PDF 元数据提取成功: {metadata}")
             return metadata
