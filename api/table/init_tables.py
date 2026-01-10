@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.exc import OperationalError
 import sys
-
+from dotenv import load_dotenv, dotenv_values
 
 from agent.config.sql_config import SqlConfig
 from agent.provider.sql_provider import SqlProvider
@@ -23,11 +23,18 @@ from api.table.base.pipeline_task import PipelineTask
 from api.table.base.document_chunk import DocumentChunk
 from api.table.base.instruction_datum import InstructionDatum
 from api.table.base.llm_config import LLMConfig
+from api.table.base.knowledge_base import KnowledgeBase
+
+from api.schema.retrieval_schema import RetrievalSettings, RetrievalMode, RerankConfig, HybridConfig
+
 
 ROOT_DIRECTORY = Path(__file__).parent.parent.parent
 SQL_CONFIG_PATH = str(ROOT_DIRECTORY / "config" / "yaml" / "postgresql.yaml")
-
+ENV_PATH = str(ROOT_DIRECTORY / ".env")
 sql_config = SqlConfig.from_file(SQL_CONFIG_PATH)
+environment = dotenv_values(ENV_PATH)
+DEEPSEEK_API_KEY = environment.get("DEEPSEEK_API_KEY")
+ALIYUN_API_KEY = environment.get("ALIYUN_API_KEY")
 
 async def check_and_upgrade_tables():
     """
@@ -44,6 +51,21 @@ async def check_and_upgrade_tables():
                 "instruction_datum", 
                 "chunk_index_description", 
                 "ALTER TABLE instruction_datum ADD COLUMN chunk_index_description JSON DEFAULT '[]'::json"
+            ),
+            (
+                "sys_llm_configs",
+                "model_type",
+                "ALTER TABLE sys_llm_configs ADD COLUMN model_type VARCHAR(50) DEFAULT 'llm'"
+            ),
+            (
+                "pdf_document",
+                "embedding_llm_config",
+                "ALTER TABLE pdf_document ADD COLUMN embedding_llm_config VARCHAR(255) DEFAULT 'Aliyun-Embedding-V4'"
+            ),
+            (
+                "pdf_document",
+                "kb_id",
+                "ALTER TABLE pdf_document ADD COLUMN kb_id INTEGER DEFAULT NULL REFERENCES knowledge_base(id)"
             ),
             # 未来如果有其他新增字段，可以继续加在这里
         ]
@@ -153,13 +175,70 @@ async def create_tables_with_check(auto_choice: str = None):
             await create_all_tables()
             print("正在重新llm默认配置...")
             await init_default_data()
+            await init_knowledge_base_data()
         else:
             print("保留现有表，仅创建缺失的表...")
             await create_all_tables()
+            print("正在重新llm默认配置...")
+            await init_default_data()
+            await init_knowledge_base_data()
 
     else:
         print("未检测到现有表，开始创建新表...")
         await create_all_tables()
+
+async def init_knowledge_base_data():
+    """
+    初始化默认知识库数据
+    """
+    print("正在初始化默认知识库 (通用农业知识库)...")
+
+    # 1. 构造 Pydantic 对象
+    default_settings = RetrievalSettings(
+        top_k=5,
+        score_threshold=0.4,
+        mode=RetrievalMode.HYBRID,
+        rerank=RerankConfig(
+            enable=True,
+            model_name="Aliyun-GTE-Rerank",  # 确保这个名字在 LLMConfig 里有
+            top_n=20
+        ),
+        hybrid_params=HybridConfig(alpha=0.5)
+    )
+
+    # 2. 构造入库字典
+    default_kb = {
+        "name": "通用农业知识库",
+        "description": "系统内置默认知识库",
+        "avatar_url": "https://img.alicdn.com/imgextra/i4/O1CN01Z5PaLz1O7guX2l8j4_!!6000000001654-2-tps-200-200.png",
+        "embedding_model": "Aliyun-Embedding-V4", # 对应 LLMConfig Name
+        "vector_store_collection_name": "global_agriculture_pool",
+        "_settings": default_settings.model_dump(), 
+        "user_id": 1, 
+        "is_public": True,
+        "is_deleted": False
+    }
+
+    sql_provider = None
+    try:
+        sql_provider = SqlProvider(model=KnowledgeBase, sql_config_path=SQL_CONFIG_PATH)
+        
+        # 检查是否存在
+        existing = await sql_provider.get_record_by_condition({"name": default_kb["name"]})
+        
+        if not existing:
+            await sql_provider.add_record(default_kb)
+            print(f"✅ 默认知识库 [{default_kb['name']}] 初始化成功。")
+        else:
+            print(f"⚡ 知识库 [{default_kb['name']}] 已存在，跳过。")
+            
+    except Exception as e:
+        print(f"❌ 初始化知识库数据失败: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if sql_provider: await sql_provider.close()
+
 
 async def init_default_data():
     """
@@ -167,22 +246,56 @@ async def init_default_data():
     """
     print("正在初始化默认 LLM 配置 (DeepSeek-V3)...")
     
-    default_config = {
-        "name": "DeepSeek-V3",
-        "provider": "DeepSeek",
-        "model_name": "deepseek-chat",
-        "api_key": "sk-d8b7a899050f41c7a3deac1cb149cbb4",
-        "base_url": "https://api.deepseek.com",
-        "is_default": True
-    }
-
+    default_configs = [
+        # 1. 默认 LLM (DeepSeek)
+        {
+            "name": "DeepSeek-V3",
+            "model_type": "llm",          # 明确指定类型
+            "provider": "DeepSeek",
+            "model_name": "deepseek-chat",
+            "api_key": DEEPSEEK_API_KEY,
+            "base_url": "https://api.deepseek.com",
+            "is_default": True
+        },
+        # 2. 默认 Embedding (Aliyun)
+        {
+            "name": "Aliyun-Embedding-V4",
+            "model_type": "embedding",    # 明确指定类型
+            "provider": "Aliyun",
+            "model_name": "text-embedding-v4",
+            "api_key": ALIYUN_API_KEY,
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "is_default": True
+        },
+        # 3. 默认 Rerank (Aliyun)
+        {
+            "name": "Aliyun-GTE-Rerank",
+            "model_type": "rerank",       # 明确指定类型
+            "provider": "Aliyun",
+            "model_name": "gte-rerank-v2",
+            "api_key": ALIYUN_API_KEY,
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "is_default": True
+        }
+    ]
+    
+    print(default_configs)
     sql_provider = None
     try:
         # 初始化 Provider
         sql_provider = SqlProvider(model=LLMConfig, sql_config_path=SQL_CONFIG_PATH)
         
-        # 写入数据
-        await sql_provider.add_record(default_config)
+        for config in default_configs:
+            # 1. 检查是否存在 (通过 name 唯一索引判断)
+            existing_records = await sql_provider.get_record_by_condition({"name": config["name"]})
+            
+            if not existing_records:
+                # 2. 不存在则写入
+                await sql_provider.add_record(config)
+                print(f"✅ 默认配置 [{config['name']}] ({config['model_type']}) 写入成功。")
+            else:
+                # 3. 已存在则跳过
+                print(f"⚡ 配置 [{config['name']}] 已存在，跳过初始化。")
         print("✅ 默认 LLM 配置写入成功。")
         
     except Exception as e:

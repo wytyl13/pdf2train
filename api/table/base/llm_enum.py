@@ -8,6 +8,13 @@
 
 from enum import Enum
 
+class ModelType(str, Enum):
+    """模型类型"""
+    LLM = "llm"
+    EMBEDDING = "embedding"
+    RERANK = "rerank"
+
+
 class LLMProvider(str, Enum):
     """
     LLM 提供商枚举

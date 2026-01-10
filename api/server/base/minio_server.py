@@ -33,7 +33,7 @@ class MinioServer:
     def __init__(self, service: MinioService, pdf_document_service: PdfDocumentService = None):
         self.service = service # 注入业务实例
         self.pdf_document_service = pdf_document_service
-        self.router = APIRouter()
+        self.router = APIRouter(tags=["MinIO Server"])
         self._register_routes()
         self.logger = service.logger # 复用 logger
         

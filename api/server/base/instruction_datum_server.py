@@ -6,7 +6,7 @@
 @File    : instruction_datum_server.py
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.encoders import jsonable_encoder
 from datetime import datetime
@@ -64,29 +64,32 @@ class InstructionDatumServer:
 
     def register_routes(self, app: FastAPI):
         """注册路由"""
+        router = APIRouter(tags=["Instruction Datum Server"])
         # 列表查询
-        app.post("/api/instruction/list")(self.get_list)
+        router.post("/api/instruction/list")(self.get_list)
         
         # 更新/审核
-        app.post("/api/instruction/update")(self.update_datum)
+        router.post("/api/instruction/update")(self.update_datum)
         
         # 删除单条
-        app.post("/api/instruction/delete")(self.delete_datum)
+        router.post("/api/instruction/delete")(self.delete_datum)
         
         # 下载 .jsonl 文件 (核心: 用于微调训练)
-        app.get("/api/instruction/download_jsonl/{doc_id}")(self.download_jsonl)
+        router.get("/api/instruction/download_jsonl/{doc_id}")(self.download_jsonl)
         
         # 预览 (返回 JSON 格式)
-        app.get("/api/instruction/preview/{doc_id}")(self.preview_data)
+        router.get("/api/instruction/preview/{doc_id}")(self.preview_data)
         
         # 物理删除单条
-        app.post("/api/instruction/delete")(self.delete_datum)
+        router.post("/api/instruction/delete")(self.delete_datum)
         
         # 按文档清空
-        app.post("/api/instruction/clear_by_doc")(self.clear_by_doc)
+        router.post("/api/instruction/clear_by_doc")(self.clear_by_doc)
         
         # 导出所有数据jsonl
-        app.get("/api/instruction/download_jsonl_all")(self.download_jsonl_all)
+        router.get("/api/instruction/download_jsonl_all")(self.download_jsonl_all)
+
+        app.include_router(router)
 
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
         return JSONResponse(

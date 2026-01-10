@@ -6,7 +6,7 @@
 @File    : pdf_document.py
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, BigInteger, Text, JSON
+from sqlalchemy import Column, Integer, String, DateTime, BigInteger, Text, JSON, ForeignKey
 from sqlalchemy.sql import func
 from enum import IntEnum, unique
 from sqlalchemy.orm import relationship
@@ -73,9 +73,11 @@ class PdfDocument(Base):
     # [新增] 进度字段
     progress = Column(Integer, default=0, comment='总体进度百分比(0-100, -1为失败)')
     
+    kb_id = Column(Integer, ForeignKey("knowledge_base.id"), nullable=True, index=True, comment='所属知识库ID')
     process_error = Column(Text, nullable=True, comment='全局错误摘要')
     instruction_gen_llm_config = Column(String(100), nullable=True, comment='指令生成使用的LLM配置名称')
     h_title_llm_config = Column(String(100), nullable=True, comment='多级标题处理使用的LLM配置名称')
+    embedding_llm_config = Column(String(100), nullable=True, comment='语义嵌入LLM配置名称')
     # === 审计 ===
     user_name = Column(String(64), nullable=False, comment='上传人')
     create_time = Column(DateTime(timezone=True), server_default=func.now(), comment='上传时间')
@@ -90,6 +92,7 @@ class PdfDocument(Base):
         order_by="PipelineTask.step_order", 
         cascade="all, delete-orphan"
     )
+    knowledge_base = relationship("KnowledgeBase", back_populates="documents")
     
     
     @property

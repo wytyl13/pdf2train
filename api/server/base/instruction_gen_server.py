@@ -7,7 +7,7 @@
 """
 
 from pydantic import BaseModel, Field
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, APIRouter
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from datetime import datetime
@@ -41,8 +41,10 @@ class InstructionGenServer:
 
     def register_routes(self, app: FastAPI):
         """注册路由"""
+        router = APIRouter(tags=["Instruction Gen Server"])
         # 手动触发切分任务
-        app.post("/api/instruction/run")(self.run)
+        router.post("/api/instruction/run")(self.run)
+        app.include_router(router)
 
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
         return JSONResponse(

@@ -25,6 +25,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \ 
     pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN --mount=type=cache,target=/root/.cache/pip \ 
+    pip install tabulate lxml html5lib -i https://pypi.tuna.tsinghua.edu.cn/simple
+
 # 6. 复制当前目录的所有代码到容器的 /app 目录
 COPY . .
 

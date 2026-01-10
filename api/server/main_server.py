@@ -30,6 +30,7 @@ from api.service.instruction_datum_service import InstructionDatumService
 from api.service.llm_config_service import LLMConfigService
 from api.service.embedding_service import EmbeddingService
 from api.service.search_service import SearchService
+from api.service.knowledge_base_service import KnowledgeBaseService
 
 # 导入各个服务类
 from api.server.base.minio_server import MinioServer
@@ -43,6 +44,7 @@ from api.server.base.instruction_gen_server import InstructionGenServer
 from api.server.base.instruction_datum_server import InstructionDatumServer
 from api.server.base.llm_config_server import LLMConfigServer
 from api.server.base.embedding_server import EmbeddingServer
+from api.server.base.knowledge_base_server import KnowledgeBaseServer
 
 from tool.h1_context_assembler import H1ContextAssembler
 from tool.instruction_llm_generator import InstructionLLMGenerator
@@ -124,9 +126,15 @@ class AeroSenseMainServer:
             sql_config_path=self.sql_config_path,
             document_chunk_service=self.document_chunk_service,
             pipeline_task_service=self.task_service,
+            pdf_document_service=self.pdf_document_service,
+            llm_config_service=self.llm_config_service
         )
         self.search_service = SearchService()
-        
+        self.knowledge_base_service = KnowledgeBaseService(
+            sql_config_path=SQL_CONFIG_PATH,
+            embedding_service=self.embedding_service,
+            llm_config_service=self.llm_config_service
+        )
         
         # 初始化各个服务
         self.minio_storage_server = MinioServer(service=self.minio_service, pdf_document_service=self.pdf_document_service)
@@ -138,7 +146,12 @@ class AeroSenseMainServer:
         self.instruction_gen_server = InstructionGenServer(instruction_gen_service=self.instruction_gen_service)
         self.instruction_datum_server = InstructionDatumServer(instruction_datum_service=self.instruction_datum_service)
         self.llm_config_server = LLMConfigServer(llm_config_service=self.llm_config_service)
-        self.embedding_server = EmbeddingServer(embedding_service=self.embedding_service, search_service=self.search_service)
+        self.embedding_server = EmbeddingServer(
+            embedding_service=self.embedding_service, 
+            search_service=self.search_service, 
+            llm_config_service=self.llm_config_service
+        )
+        self.knowledge_base_server = KnowledgeBaseServer(kb_service=self.knowledge_base_service)
         
         # 设置应用
         self._setup_middleware()
@@ -192,6 +205,7 @@ class AeroSenseMainServer:
         self.instruction_datum_server.register_routes(self.app)
         self.llm_config_server.register_routes(self.app)
         self.embedding_server.register_routes(self.app)
+        self.knowledge_base_server.register_routes(self.app)
 
     def run(
         self, 

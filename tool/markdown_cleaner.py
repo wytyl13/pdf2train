@@ -14,6 +14,9 @@ from typing import List, Dict
 from pathlib import Path
 from openai import OpenAI, AsyncOpenAI
 from agent.config.llm_config import LLMConfig
+import pandas as pd
+from io import StringIO
+
 
 from api.service.llm_config_service import LLMConfigService
 
@@ -139,8 +142,76 @@ class MarkdownCleaner:
             
             # 3. 视为直接的 Markdown Content
             content = file_path
+            
+        # 1. 先清洗 HTML 表格 (改变行结构)
+        content = self._clean_html_tables(content)
+        
+        # 2. 再清洗 OCR 伪影 (优化内容细节)
         content = self._clean_ocr_artifacts(content)
         return content.splitlines(keepends=True)
+    
+
+    def _clean_html_tables(self, text: str) -> str:
+        """
+        [紧凑版] 手动构建 Markdown 表格，去除多余空格，防止编辑器自动换行导致的视觉错乱
+        """
+        if not text: return ""
+
+        def _html_to_md_converter(match):
+            html_content = match.group(0)
+            try:
+                # 1. 解析 HTML
+                dfs = pd.read_html(StringIO(html_content), header=0)
+                if not dfs: return html_content
+                df = dfs[0]
+                
+                # 2. 扁平化表头
+                if isinstance(df.columns, pd.MultiIndex):
+                    new_cols = []
+                    for col in df.columns:
+                        clean_col = "-".join([str(c) for c in col if "Unnamed" not in str(c)])
+                        new_cols.append(clean_col)
+                    df.columns = new_cols
+                
+                # 3. 清洗单元格 (内部换行转空格)
+                df = df.astype(str).apply(lambda x: x.str.replace(r'\s+', ' ', regex=True))
+                
+                # === 4. 手动构建紧凑型表格 (无填充空格) ===
+                lines = []
+                
+                # A. 表头
+                # .strip() 去除两侧空格
+                headers = [str(c).replace("|", "&#124;").strip() for c in df.columns]
+                lines.append("| " + " | ".join(headers) + " |")
+                
+                # B. 分割线 (只用3个减号，不填充)
+                separators = ["---"] * len(df.columns)
+                lines.append("| " + " | ".join(separators) + " |")
+                
+                # C. 数据行
+                for _, row in df.iterrows():
+                    # .strip() 去除空格，保证紧凑
+                    cells = [str(val).replace("|", "&#124;").strip() for val in row]
+                    lines.append("| " + " | ".join(cells) + " |")
+                
+                # D. 拼接
+                markdown_table = "\n".join(lines)
+                
+                # Debug 打印
+                print("\n" + "="*40)
+                print(f"⚡️ [紧凑模式] 表格已生成 ({len(df)} 行):")
+                print(markdown_table[:200] + "...\n(省略后续内容)") # 只打印前200字符避免刷屏
+                print("="*40 + "\n")
+
+                return f"\n\n{markdown_table}\n\n"
+            
+            except Exception as e:
+                print(f"❌ 表格转换失败: {e}")
+                return html_content
+
+        pattern = r'(<table[^>]*>.*?</table>)'
+        return re.sub(pattern, _html_to_md_converter, text, flags=re.DOTALL | re.IGNORECASE)
+
 
 
     def _clean_ocr_artifacts(self, text: str) -> str:

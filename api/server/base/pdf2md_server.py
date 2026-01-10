@@ -35,8 +35,10 @@ class Pdf2MdServer:
         self.pdf2md_service = pdf2md_service # 注入业务实例
 
     def register_routes(self, app: FastAPI):
+        router =  APIRouter(tags=["PDF2MD Server"])
         # 1. 提交任务接口
-        app.add_api_route("/api/pdf2md/convert", self.convert_pdf, methods=["POST"])
+        router.add_api_route("/api/pdf2md/convert", self.convert_pdf, methods=["POST"])
+        app.include_router(router)
 
     async def convert_pdf(self, request: PdfConvertRequest, background_tasks: BackgroundTasks):
         try:

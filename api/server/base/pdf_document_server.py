@@ -6,7 +6,7 @@
 @File    : pdf_document_server.py
 """
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime
 import logging
@@ -34,6 +34,7 @@ class PdfDocRequest(BaseModel):
     object_name: Optional[str] = None
     file_size: Optional[int] = None
     
+    kb_id: Optional[int] = None
     # 元数据
     page_count: Optional[int] = None
     author: Optional[str] = None
@@ -50,9 +51,15 @@ class PdfDocRequest(BaseModel):
     
     instruction_gen_llm_config: Optional[str] = None
     h_title_llm_config: Optional[str] = None
-    
+    embedding_llm_config: Optional[str] = None
     # 用户
     user_name: Optional[str] = None
+    page: int = 1, 
+    page_size: int = 6
+    keyword: Optional[str] = None
+
+
+class UnsignedRequest(BaseModel):
     page: int = 1, 
     page_size: int = 6
     keyword: Optional[str] = None
@@ -61,6 +68,9 @@ class PdfDocRequest(BaseModel):
 class ContentSaveRequest(BaseModel):
     doc_id: int
     content: str
+
+class DocCountByKbId(BaseModel):
+    kb_id: int
     
 
 class PdfDocumentServer:
@@ -74,18 +84,23 @@ class PdfDocumentServer:
     
     def register_routes(self, app: FastAPI):
         """注册路由"""
-        app.get("/api/pdf_document")(self.get_pdf_documents)
-        app.post("/api/pdf_document/list")(self.post_get_pdf_documents)
-        app.post("/api/pdf_document/save")(self.save_pdf_document)
-        app.post("/api/pdf_document/update")(self.update_pdf_document)
-        app.post("/api/pdf_document/delete")(self.delete_pdf_document)
-        app.get("/api/pdf_document/statistics")(self.get_statistics)
-        app.get("/api/pdf_document/chunk_count")(self.get_chunk_count)
+        router = APIRouter(tags=["PDF Document Server"])
+        router.get("/api/pdf_document")(self.get_pdf_documents)
+        router.post("/api/pdf_document/list")(self.post_get_pdf_documents)
+        router.post("/api/pdf_document/save")(self.save_pdf_document)
+        router.post("/api/pdf_document/update")(self.update_pdf_document)
+        router.post("/api/pdf_document/delete")(self.delete_pdf_document)
+        router.get("/api/pdf_document/statistics")(self.get_statistics)
+        router.get("/api/pdf_document/chunk_count")(self.get_chunk_count)
+        router.post("/api/pdf_document/unassigned")(self.get_unassigned_docs)
         
-        app.get("/api/pdf_document/content")(self.get_doc_content)
-        app.get("/api/pdf_document/original_chunk/content")(self.get_original_chunk_content)
-        app.post("/api/pdf_document/content/save")(self.save_doc_content)
-        app.post("/api/pdf_document/export_books_jsonl")(self.export_books_jsonl)
+        router.get("/api/pdf_document/content")(self.get_doc_content)
+        router.get("/api/pdf_document/original_chunk/content")(self.get_original_chunk_content)
+        router.post("/api/pdf_document/content/save")(self.save_doc_content)
+        router.post("/api/pdf_document/export_books_jsonl")(self.export_books_jsonl)
+        router.post("/api/pdf_document/get_doc_count_by_kb_id")(self.get_doc_count_by_kb_id)
+
+        app.include_router(router)
 
     # === 辅助方法：生成统一响应 ===
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
@@ -115,6 +130,7 @@ class PdfDocumentServer:
         doc_id: Optional[int] = None,
         file_name: Optional[str] = None,
         bucket_name: Optional[str] = None,
+        kb_id: Optional[int] = None,
         status: Optional[List[int]] = None,
         filter_step_type: Optional[int] = None,
         filter_step_status: Optional[List[int]] = None,
@@ -130,7 +146,7 @@ class PdfDocumentServer:
             if file_name: condition["file_name"] = file_name
             if bucket_name: condition["bucket_name"] = bucket_name
             if status is not None: condition["status"] = status
-
+            if kb_id is not None: condition["kb_id"] = kb_id
             # 2. 调用 Service
             result_data = await self.pdf_document_service.get_document_list(
                 condition, 
@@ -138,7 +154,8 @@ class PdfDocumentServer:
                 page_size,
                 filter_step_type=filter_step_type,
                 filter_step_status=filter_step_status,
-                keyword=keyword
+                keyword=keyword,
+                kb_id=kb_id
             )
             
             # 2. 直接返回
@@ -179,7 +196,13 @@ class PdfDocumentServer:
         )
 
     
-
+    async def get_doc_count_by_kb_id(
+        self, 
+        request: DocCountByKbId,
+    ):
+        count = await self.pdf_document_service.get_doc_count_by_kb_id(request.kb_id)
+        return self._response(True, "查询成功", count)
+    
     async def get_statistics(self):
         """GET 获取文档统计概览"""
         try:
@@ -196,6 +219,24 @@ class PdfDocumentServer:
             return self._response(False, f"获取统计失败: {str(e)}", code=500)
 
 
+    async def get_unassigned_docs(
+        self, 
+        request: UnsignedRequest
+    ):
+        """
+        获取可用文档列表 (未加入任何知识库的文档)
+        """
+        try:
+            data = await self.pdf_document_service.get_unassigned_documents(
+                page=request.page, 
+                page_size=request.page_size, 
+                keyword=request.keyword
+            )
+            return self._response(True, "获取成功", data)
+        except Exception as e:
+            return self._response(False, f"获取失败: {str(e)}", code=500)
+
+
     async def post_get_pdf_documents(
         self, 
         request: PdfDocRequest,
@@ -205,6 +246,7 @@ class PdfDocumentServer:
             doc_id=request.doc_id,
             file_name=request.file_name,
             bucket_name=request.bucket_name,
+            kb_id=request.kb_id,
             status=request.status,
             page=request.page,
             keyword=request.keyword,

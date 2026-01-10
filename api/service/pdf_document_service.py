@@ -10,9 +10,10 @@ import logging
 import asyncio
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from sqlalchemy import and_, or_
 from pathlib import Path
 from dotenv import load_dotenv, dotenv_values
+from sqlalchemy import select, func, and_, or_
+
 
 # 导入数据库模型和工具
 from api.table.base.pdf_document import PdfDocument, DocStatus, CoverInfo
@@ -23,6 +24,8 @@ from api.service.pipeline_task_service import PipelineTaskService
 from api.service.document_chunk_service import DocumentChunkService
 from api.service.instruction_datum_service import InstructionDatumService
 from api.service.llm_config_service import LLMConfigService
+from api.table.base.llm_enum import ModelType
+
 
 ROOT_DIRECTORY = Path(__file__).parent.parent.parent
 ENV_PATH = str(ROOT_DIRECTORY / ".env")
@@ -170,7 +173,8 @@ class PdfDocumentService:
         page_size: Optional[int] = None,
         filter_step_type: Optional[int] = None,
         filter_step_status: Optional[List[int]] = None,
-        keyword: Optional[str] = None
+        keyword: Optional[str] = None,
+        kb_id: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         根据条件查询文档列表
@@ -184,11 +188,13 @@ class PdfDocumentService:
                 "id", "file_name", "bucket_name", "object_name", "file_size", 
                 "page_count", "author", "status", "user_name", "create_time", 
                 "original_title", "summary", "process_error", "content_type",
-                "cover_info", "progress",
+                "cover_info", "progress", "kb_id",
                 "instruction_gen_llm_config",
-                "h_title_llm_config"
+                "h_title_llm_config",
+                "embedding_llm_config"
             ]
-            
+            if kb_id is not None:
+                condition["kb_id"] = kb_id
             complex_filters = []
             
             # 联表过滤任务状态
@@ -233,6 +239,13 @@ class PdfDocumentService:
                 result = {"items": items, "total": len(items)}
                 
             base_url = self._get_base_url()
+            
+            # 在这里直接查询一次默认 Embedding 配置名称 (初始化)
+            default_embedding_name = await self.llm_config_service.get_active_config_name(
+                model_type=ModelType.EMBEDDING.value
+            )
+            
+            
             for doc in result['items']:
                 # A. 处理下载链接
                 if doc.get('bucket_name') and doc.get('object_name'):
@@ -249,6 +262,9 @@ class PdfDocumentService:
                         doc['cover_url'] = f"{base_url}/{cover_obj.bucket}/{cover_obj.path}"
                     except Exception:
                         pass # 忽略解析错误
+                    
+                if not doc.get('embedding_llm_config'):
+                    doc['embedding_llm_config'] = default_embedding_name
             
             return result
 
@@ -327,7 +343,10 @@ class PdfDocumentService:
 
             if "h_title_llm_config" not in data:
                 data["h_title_llm_config"] = await self.llm_config_service.get_active_config_name()
-            
+
+            if "embedding_llm_config" not in data:
+                data["embedding_llm_config"] = await self.llm_config_service.get_active_config_name(model_type=ModelType.EMBEDDING.value)
+
             sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
             
             # 1. 执行插入 Document
@@ -354,6 +373,14 @@ class PdfDocumentService:
             # 补充更新时间（如果表里有 update_time 字段的话）
             data["update_time"] = datetime.now()
             sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
+            
+            # [TODO 未来优化点]
+            # 如果修改了 kb_id 且文档状态是 SUCCESS，可能需要异步触发 Qdrant Payload 的更新
+            # if "kb_id" in data:
+            #     current_doc = await sql_provider.get_record_by_id(doc_id)
+            #     if current_doc.status == 100:
+            #          await self.sync_kb_change_to_qdrant(doc_id, data["kb_id"])
+            
             
             # 执行更新
             result = await sql_provider.update_record(record_id=doc_id, data=data)
@@ -537,6 +564,143 @@ class PdfDocumentService:
             if sql_provider: await sql_provider.close()
     
     
+    async def get_kb_id_by_doc_id(self, doc_id: int) -> Optional[int]:
+        """
+        获取文档所属知识库 ID
+        返回: int (kb_id) 或 None (如果不存在或未绑定)
+        """
+        sql_provider = None
+        try:
+            sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
+            doc = await sql_provider.get_record_by_id(doc_id)
+            
+            if doc:
+                # 兼容处理：判断是 字典(dict) 还是 对象(Object)
+                if isinstance(doc, dict):
+                    return doc.get("kb_id")
+                else:
+                    # SQLAlchemy 对象使用属性访问
+                    return getattr(doc, "kb_id", None)
+            
+            return None
+
+        except Exception as e:
+            self.logger.error(f"查询文档所属知识库失败: {e}")
+            return None
+        finally:
+            if sql_provider: await sql_provider.close()
+    
+    
+    async def get_doc_count_by_kb_id(self, kb_id: int) -> dict:
+        """
+        获取知识库文档统计信息
+        返回格式: {"total": 100, "embedded": 80}
+        """
+        sql_provider = None
+        try:
+            sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
+            
+            async with sql_provider.get_db_session() as session:
+                # 1. 查询该知识库下的文档总数
+                stmt_total = (
+                    select(func.count(PdfDocument.id))
+                    .where(PdfDocument.kb_id == kb_id)
+                )
+                
+                # === 2. 查询已完成向量化的数量
+                stmt_embedded = (
+                    select(func.count(PdfDocument.id))
+                    .join(PipelineTask, PdfDocument.id == PipelineTask.doc_id)
+                    .where(PdfDocument.kb_id == kb_id)
+                    .where(PipelineTask.task_type == TaskType.QDRANT_INDEX)
+                    .where(PipelineTask.status == TaskLifecycle.SUCCESS)
+                )
+
+                # 并发执行查询
+                total_result = await session.execute(stmt_total)
+                embedded_result = await session.execute(stmt_embedded)
+                
+                total_count = total_result.scalar() or 0
+                embedded_count = embedded_result.scalar() or 0
+                progress = round(embedded_count / total_count, 2) if total_count > 0 else 0.0
+                return {
+                    "total": total_count,
+                    "vectorized": embedded_count,
+                    "progress": progress
+                }
+
+        except Exception as e:
+            self.logger.error(f"查询统计失败: {e}")
+            return {"total": 0, "vectorized": 0, "progress": 0.0}
+        finally:
+            if sql_provider: await sql_provider.close()
+    
+    
+    async def get_unassigned_documents(
+        self, 
+        page: int = 1, 
+        page_size: int = 20,
+        keyword: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        获取未分配给任何知识库的文档列表 (kb_id IS NULL)
+        """
+        sql_provider = None
+        try:
+            sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
+            
+            # 1. 核心条件：kb_id 必须为空
+            condition = {"kb_id": None}
+            
+            # 2. 构造复杂查询 (关键词搜索)
+            complex_filters = []
+            if keyword:
+                complex_filters.append(
+                    PdfDocument.file_name.like(f"%{keyword}%")
+                )
+            
+            # 3. 指定返回字段
+            fields = ["id", "file_name", "file_size", "create_time", "status"]
+            
+            # 4. 分页查询
+            result = await sql_provider.get_records_paginated(
+                page=page,
+                page_size=page_size,
+                condition=condition, # 这里传入 kb_id=None
+                filters=complex_filters,
+                fields=fields,
+                order_by=PdfDocument.create_time.desc()
+            )
+            
+            # 5. 数据处理 (可选：格式化文件大小)
+            for item in result['items']:
+                size_bytes = item.get('file_size', 0)
+                # 简单格式化 MB
+                if size_bytes:
+                    item['file_size_display'] = f"{round(size_bytes / (1024 * 1024), 1)} MB"
+                else:
+                    item['file_size_display'] = "0 MB"
+                    
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"查询未分配文档失败: {e}")
+            raise e
+        finally:
+            if sql_provider: await sql_provider.close()
+    
+    
+    async def get_doc_count_by_kb_id_bake(self, kb_id: int) -> str:
+        sql_provider = None
+        try:
+            sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
+            # 1. 查询所有属于该知识库的文档
+            docs = await sql_provider.get_record_by_condition({"kb_id": kb_id})
+            return len(docs)
+        finally:
+            if sql_provider: await sql_provider.close()
+
+
     async def save_markdown_content(self, doc_id: int, new_content: str) -> bool:
         """
         [优化后] 保存/更新 Markdown 内容

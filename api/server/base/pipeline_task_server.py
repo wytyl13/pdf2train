@@ -6,7 +6,7 @@
 @File    : pipeline_task_server.py
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.responses import JSONResponse
 from datetime import datetime
 import logging
@@ -58,17 +58,19 @@ class PipelineTaskServer:
     
     def register_routes(self, app: FastAPI):
         """注册路由"""
+        router = APIRouter(tags=["Pipeline Task Server"])
         # 获取某文档的任务详情 (给前端进度条用)
-        app.get("/api/pipeline/tasks")(self.get_tasks_by_doc)
+        router.get("/api/pipeline/tasks")(self.get_tasks_by_doc)
         
         # 内部/外部回调：更新任务状态
-        app.post("/api/pipeline/update_status")(self.update_task_status)
+        router.post("/api/pipeline/update_status")(self.update_task_status)
 
         # Dashboard 聚合统计接口
-        app.get("/api/dashboard/stats")(self.get_dashboard_stats)
+        router.get("/api/dashboard/stats")(self.get_dashboard_stats)
         
         # get recent jobs
-        app.get("/api/dashboard/recent-jobs")(self.get_recent_jobs)
+        router.get("/api/dashboard/recent-jobs")(self.get_recent_jobs)
+        app.include_router(router)
 
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):
         return JSONResponse(

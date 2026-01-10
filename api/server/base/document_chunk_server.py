@@ -6,7 +6,7 @@
 @File    : document_chunk_server.py
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.encoders import jsonable_encoder
 from datetime import datetime
@@ -58,23 +58,26 @@ class DocumentChunkServer:
 
     def register_routes(self, app: FastAPI):
         """注册路由"""
+        router = APIRouter(tags=["Document Chunk Server"])
         # 查询列表 (Knowledge Base 详情页主要接口)
-        app.post("/api/document_chunk/list")(self.get_chunk_list)
+        router.post("/api/document_chunk/list")(self.get_chunk_list)
         
         # 更新切片内容 (人工修正)
-        app.post("/api/document_chunk/update")(self.update_chunk)
+        router.post("/api/document_chunk/update")(self.update_chunk)
         
         # 删除单个切片 (人工清洗)
-        app.post("/api/document_chunk/delete")(self.delete_chunk)
+        router.post("/api/document_chunk/delete")(self.delete_chunk)
 
         # 删除某个id的所有切片
-        app.post("/api/document_chunk/delete_by_id")(self.delete_chunk_by_id)
+        router.post("/api/document_chunk/delete_by_id")(self.delete_chunk_by_id)
         
         # 下载最新的json chunk数据
-        app.get("/api/document_chunk/download/{doc_id}")(self.download_latest_json)
+        router.get("/api/document_chunk/download/{doc_id}")(self.download_latest_json)
         
         # 获取最新的json内容
-        app.get("/api/document_chunk/preview/{doc_id}")(self.get_chunk_json_content)
+        router.get("/api/document_chunk/preview/{doc_id}")(self.get_chunk_json_content)
+
+        app.include_router(router)
 
     # === 辅助方法：生成统一响应 (与 PdfDocumentServer 保持一致) ===
     def _response(self, success: bool, message: str = "", data: Any = None, code: int = 200):

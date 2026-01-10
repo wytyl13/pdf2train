@@ -20,13 +20,16 @@ from api.table.base.document_chunk import DocumentChunk
 from agent.provider.sql_provider import SqlProvider
 from api.service.document_chunk_service import DocumentChunkService
 from api.service.pipeline_task_service import PipelineTaskService
-
+from api.table.base.pdf_document import PdfDocument
+from api.service.llm_config_service import LLMConfigService
+from api.service.pdf_document_service import PdfDocumentService
 from api.table.base.pipeline_task import TaskType, TaskLifecycle, IndexStatus, IndexTaskResult
+from api.schema.qdrant_schema import MetadataUpdateRequest, UnbindKbId
 
 
 # Wangeng 服务的地址 (建议放入配置文件，这里先硬编码或从环境变量取)
 WANGENG_VECTOR_URL = "http://wangeng:9040/api/vector/ingest"
-
+WANGENG_VECTOR_UPDATE_METADATA_URL = "http://wangeng:9040/api/vector/update_metadata"  
 class EmbeddingService:
     """
     语义向量化服务
@@ -37,17 +40,87 @@ class EmbeddingService:
         self, 
         sql_config_path: str,
         document_chunk_service: DocumentChunkService,
-        pipeline_task_service: PipelineTaskService
+        pipeline_task_service: PipelineTaskService,
+        llm_config_service: LLMConfigService,
+        pdf_document_service: PdfDocumentService
     ):
         self.sql_config_path = sql_config_path
         self.document_chunk_service = document_chunk_service
         self.pipeline_task_service = pipeline_task_service
+        self.llm_config_service = llm_config_service
+        self.pdf_document_service = pdf_document_service
         self.logger = logging.getLogger(self.__class__.__name__)
+
+
+    async def update_docs_to_kb(
+        self, 
+        metadata_update_request: MetadataUpdateRequest,
+        update_sql: bool = True
+    ) :
+        """
+        将一批文档关联到指定知识库
+        """
+        # x先更新collecttion_name
+        collection_name = await self.llm_config_service.get_real_model_name(metadata_update_request.collection_name)
+        
+        # 1 更新pdf_document表的 kb_id 字段
+        if "kb_id" not in metadata_update_request.payload:
+            raise ValueError("元数据 payload 中必须包含 'kb_id' 字段")
+
+        # 2. 再安全地获取值（此时值可能是 int，也可能是 None）
+        new_kb_id = metadata_update_request.payload["kb_id"]
+        
+        # 获取文档 ID 列表
+        doc_ids = metadata_update_request.filter_value
+        if not isinstance(doc_ids, list):
+            doc_ids = [doc_ids]
+        
+        # 确保 filter_key 是针对文档 ID 的 (防止误传其他条件导致 SQL 更新错误)
+        if metadata_update_request.filter_key != "doc_id":
+            raise ValueError("批量添加操作仅支持通过 'doc_id' 进行筛选")
+        qdrant_filter_key = "doc_kb_id"
+        sql_provider = None
+        try:
+            if update_sql:
+                # 1. 更新 pdf_document 表的 kb_id 字段
+                sql_provider = SqlProvider(model=PdfDocument, sql_config_path=self.sql_config_path)
+                
+                stmt = (
+                    update(PdfDocument)
+                    .where(PdfDocument.id.in_(doc_ids))
+                    .values(
+                        kb_id=new_kb_id,
+                        update_time=datetime.now()
+                    )
+                )
+                async with sql_provider.get_db_session() as session:
+                    result = await session.execute(stmt)
+
+            # 2 Update Payload: set kb_id = :kb_id where doc_id in :doc_ids
+            metadata_ = metadata_update_request.copy()
+            metadata_.filter_key = qdrant_filter_key  # 👈 修改为 Qdrant 中的字段名
+            metadata_.collection_name = collection_name
+            metadata_.payload = metadata_update_request.payload.copy()
+            if new_kb_id is None:
+                metadata_.payload["kb_id"] = 0
+            await self.update_metadata(metadata_)
+
+            return True
+
+        except Exception as e:
+            print(f"添加文档到知识库失败: {e}")
+            raise e
+        finally:
+            if sql_provider:
+                await sql_provider.close()
+
 
     async def run_embedding_for_doc(
         self, 
         doc_id: int,
-        
+        model_name: str,
+        base_url: str,
+        api_key: str
     ) -> bool:
         """
         [核心入口] 为指定文档的所有 Chunk 执行向量化
@@ -106,7 +179,13 @@ class EmbeddingService:
                 batch_chunks = chunks[start_idx:end_idx]
                 
                 # 5.1 处理批次 (构造Payload -> API -> 更新Chunk状态)
-                success_count = await self._process_batch(doc_id, batch_chunks)
+                success_count = await self._process_batch(
+                    doc_id, 
+                    batch_chunks,
+                    model_name,
+                    base_url,
+                    api_key
+                )
                 processed_count += success_count
                 
                 # 5.2 计算当前处理比例 (0.0 ~ 1.0)
@@ -141,6 +220,21 @@ class EmbeddingService:
                     # 指向下一个检查点
                     next_checkpoint_idx += 1
 
+
+            # 新增 更新qdrant绑定字段
+            kb_id = await self.pdf_document_service.get_kb_id_by_doc_id(doc_id)
+            if kb_id:
+                metadata_update_request = MetadataUpdateRequest(
+                    collection_name=model_name,
+                    filter_key="doc_kb_id",
+                    filter_value=doc_id,
+                    payload={"kb_id": kb_id}
+                )
+                await self.update_docs_to_kb(
+                    metadata_update_request=metadata_update_request,
+                    update_sql=False
+                )
+            
             # 6. 任务完成 (强制设为 100)
             final_result = IndexTaskResult(
                 indexed_count=processed_count,
@@ -182,11 +276,10 @@ class EmbeddingService:
             # 2. 构造元数据 (Metadata)
             # 从数据库读取原始元数据，若不存在则初始化为空字典
             meta_info = chunk.get("metadata", {}) or {} 
-            
             # 3. 组装扁平化的向量库元数据
             vector_metadata = {
                 "chunk_id": str(chunk["id"]),      # [核心] 用于保持 SQL 与 Qdrant 的 ID 强一致
-                "doc_id": doc_id,                  # 所属文档 ID
+                "doc_kb_id": doc_id,                  # 所属文档 ID
                 "chunk_index": chunk.get("chunk_index", 0),
                 "token_count": chunk.get("token_count", 0),
                 **meta_info                         # 解包 H1, H2, file_name 等业务元数据
@@ -204,21 +297,34 @@ class EmbeddingService:
             
         return payload_chunks
 
+
     @retry(
         stop=stop_after_attempt(3), 
         wait=wait_fixed(2),
         retry=retry_if_exception_type(httpx.HTTPError) # 只重试网络错误
     )
-    async def _call_vector_api(self, payload_chunks: List[Dict]) -> int:
+    async def _call_vector_api(
+        self, 
+        payload_chunks: List[Dict],
+        model_name: str,
+        base_url: str,
+        api_key: str
+    ) -> int:
         """
         [独立抽取的 API 调用方法] 负责发送请求，包含重试逻辑
         """
         timeout_settings = httpx.Timeout(60.0, connect=10.0) # 设置合理的超时
-        
         async with httpx.AsyncClient(timeout=timeout_settings) as client:
             response = await client.post(
                 WANGENG_VECTOR_URL,
-                json={"chunks": payload_chunks},
+                json={
+                    "chunks": payload_chunks, 
+                    "embed_config": {
+                        "model_name": model_name, 
+                        "api_key": api_key, 
+                        "base_url": base_url
+                    }
+                },
             )
             response.raise_for_status() # 如果 4xx/5xx 直接抛出异常触发重试
             
@@ -230,7 +336,95 @@ class EmbeddingService:
                 
         return len(payload_chunks)
 
-    async def _process_batch(self, doc_id: int, batch_chunks: List[Dict]) -> int:
+
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_fixed(2),
+        retry=retry_if_exception_type(httpx.HTTPError) # 只重试网络错误
+    )
+    async def update_metadata(
+        self, 
+        metadata_update_request: MetadataUpdateRequest
+    ) -> int:
+        """
+        [独立抽取的 API 调用方法] 负责发送请求，包含重试逻辑
+        """
+        collection_name = metadata_update_request.collection_name
+        filter_key = metadata_update_request.filter_key
+        filter_value = metadata_update_request.filter_value
+        payload = metadata_update_request.payload
+
+        timeout_settings = httpx.Timeout(60.0, connect=10.0) # 设置合理的超时
+        async with httpx.AsyncClient(timeout=timeout_settings) as client:
+            response = await client.post(
+                WANGENG_VECTOR_UPDATE_METADATA_URL,
+                json={
+                    "collection_name": collection_name,
+                    "filter_key": filter_key,
+                    "filter_value": filter_value,
+                    "payload": payload
+                },
+            )
+            response.raise_for_status() # 如果 4xx/5xx 直接抛出异常触发重试
+            
+            resp_data = response.json()
+            is_success = resp_data.get("success") or (resp_data.get("status") == "success")
+            if not is_success:
+                raise Exception(f"API 业务错误: {resp_data}")
+                
+        return is_success
+
+
+    async def unbind_kb_id(
+        self, 
+        unbind_request: UnbindKbId
+    ):
+        """
+        [私有方法] 调用远程向量服务，将指定 kb_id 的向量归属设为 0
+        使用现有的 update_metadata 接口
+        """
+        timeout_settings = httpx.Timeout(60.0, connect=10.0)
+        collection_name = unbind_request.collection_name
+        kb_id = unbind_request.kb_id
+        
+        payload_data = {
+            "collection_name": collection_name,
+            "filter_key": "kb_id",      # 筛选条件：字段名为 kb_id
+            "filter_value": kb_id,      # 筛选值：当前知识库 ID
+            "payload": {"kb_id": 0}     # 更新动作：设为 0 (公海)
+        }
+
+        async with httpx.AsyncClient(timeout=timeout_settings) as client:
+            self.logger.info(f"正在请求远程向量解绑: {payload_data}")
+            
+            response = await client.post(
+                WANGENG_VECTOR_UPDATE_METADATA_URL,
+                json=payload_data,
+            )
+            
+            # 检查 HTTP 状态码
+            response.raise_for_status() 
+            
+            # 检查业务状态码
+            resp_data = response.json()
+            # 兼容 success 字段或 status 字段
+            is_success = resp_data.get("success") is True
+            
+            if not is_success:
+                error_msg = resp_data.get("message") or "未知错误"
+                raise Exception(f"API 业务返回失败: {error_msg}")
+            
+            self.logger.info(f"远程向量解绑成功: {collection_name} -> kb_id={kb_id} 已释放")
+    
+
+    async def _process_batch(
+        self, 
+        doc_id: int, 
+        batch_chunks: List[Dict],
+        model_name: str,
+        base_url: str,
+        api_key: str
+    ) -> int:
         """[内部方法] 处理单个批次：构造Payload -> 异步API调用 -> 批量更新DB状态"""
         # 1. 构造 Wangeng API 需要的 Payload
         payload = self._build_payload(doc_id, batch_chunks)
@@ -238,7 +432,12 @@ class EmbeddingService:
             return 0
 
         # 2. 调用带有重试机制的异步 API 客户端
-        await self._call_vector_api(payload)
+        await self._call_vector_api(
+            payload,
+            model_name,
+            base_url,
+            api_key
+        )
 
         # 3. 批量将数据库中的 Chunk 标记为已索引
         chunk_ids = [str(c.get("id")) for c in batch_chunks if c.get("id")]
