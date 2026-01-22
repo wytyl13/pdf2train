@@ -1,90 +1,373 @@
-pdf2train 开发日志
+# PDF2Train 项目重构设计文档
 
-1、knowledge base菜单中最右侧的元数据信息显示不全，而且该菜单不具备编辑和保存功能
-2、chunk json数据还需要进一步清洗
-3、data import页面的二级检索还有问题
-4、删除document不完善：没有同步删除所有步骤的产物
-5、当前步骤完成以后（仅更新了全局文件状态）没有更新下一个步骤的状态
+## 版本信息
+- 版本: v2.0
+- 架构模式: Router-Manager-Service (RMS)
+- 接口风格: Pan-RPC (POST-only + JSON Request Body)
+- 重构日期: 2026-01-20
 
+---
+## 1. 核心设计原则
+```
+1. Router: 仅做参数解析与响应封装，禁止业务逻辑。
 
-pdf2train使用docker公网连接 minio容器
-但是生成的签名是公网前缀的签名，强制更改前缀为localhost验证失败
-但是使用公网前缀又在浏览器无法访问
+2. Manager: 业务逻辑编排中心，负责跨 Service 调用、事务控制、复杂计算。
 
-如何优雅的解决这个问题
-# 20251226
-1、优化工程结构（宿主机开发源代码，docker容器运行pdf2train项目）
-2、docker微服务（minio、mineru-api、postgres、pdf2train）桥接模式通信
-3、解决minio上传服务和签名服务冲突的问题。
-    上传服务为docker容器间通信，签名服务为浏览器和宿主机通信。
-    （解决办法：创建两个minio服务，一个专门负责上传文件，一个专门负责签名，注意：签名服务不需要连接服务器，使用了region="us-east-1"参数不连接，只有私有桶才会出现该问题）
+3. Service: 原子数据访问层，直接操作数据库/ORM，不含业务分支判断。
 
-# 20251227
-1、修改删除、编辑chunk data接口（修改语义块和meta data）
-2、优化删除chunk接口，新增删除后同步更新chunk步骤的result_data
-3、instruction gen
-    问题+参考资料=回答
-    问题1：参考资料如何定义？是大模型组织语言输出呢还是索引到原始chunk_id。两种办法都测试了，索引到原始chunk最优
-    问题2：大模型可见的chunk的单位是什么？chunk的元数据包含h1、h2、h3、h4、h5、h6，使用哪个单位呢？原始是使用h1作为单位的，但是现在有新的策略：物理限制+逻辑完整性
-    问题3：如何保证物理限制和逻辑完整性？定义物理token上限，从h1开始向下进行遍历，以符合条件的最大单位作为大模型可见的chunk单位。物理上限如何定义？
-        物理上限不是由人的意愿而定，而是由模型和显存的物理极限定义，因为使用api接口，因此物理上限仅取决于调用api模型的上下文上限和期望实现结果之间的平衡。
-4、
+4. Schema vs DTO: api/schema 定义前端交互，core/schema 定义数据库传输对象。
+```
 
-# 20251228
-1、删除documents chunk更新数据库，单个chunk删除到最后一个直至chunk count = 0 的时候更新任务和数据表状态，单个doc_id删除更新任务和pdf document数据表状态
-2、过滤 h1 contexts 字符数太少的问题
-3、设计并创建instruction data数据表和对应的任务类，设计并创建生成进度日志表，以断点继续生成（1229完成）
-4、删除所有chunk数据以后会更新result data为空，但是现在的删除文件的时候会从result data中找对应的原始json（chunk步骤生成的原始json），因为result data已经为空了，因此漏删除了原始json...已解决，删除完chunk data以后仅更新result_data中的chunk_count字段为0
+## 2. 项目目录结构 (Project Structure)
+project_root/
+├── api/                                  # [API Layer]
+│   ├── routers/                          # 路由定义
+│   │   ├── __init__.py
+│   │   ├── dashboard_router.py           # 仪表盘
+│   │   ├── pdf_document_router.py        # PDF文档与解析
+│   │   ├── document_chunk_router.py      # 切片管理
+│   │   ├── instruction_router.py         # 指令集管理
+│   │   ├── knowledge_base_router.py      # 知识库
+│   │   ├── embedding_router.py           # 向量化与检索
+│   │   ├── llm_config_router.py          # 模型配置
+│   │   ├── pipeline_task_router.py       # 任务流水线
+│   │   └── storage_router.py             # 文件存储
+│   │
+│   ├── schema/                           # [Request/Response Schema]
+│   │   ├── ... (对应每个Router的Schema文件)
+│   │
+│   └── dependencies.py                   # 依赖注入 (get_manager)
+│
+├── core/                                 # [Core Layer]
+│   ├── manager/                          # 业务逻辑层
+│   │   ├── __init__.py
+│   │   ├── dashboard_manager.py
+│   │   ├── pdf_document_manager.py
+│   │   ├── document_chunk_manager.py
+│   │   ├── instruction_manager.py
+│   │   ├── knowledge_base_manager.py
+│   │   ├── embedding_manager.py          # 包含 retrieval 逻辑
+│   │   ├── llm_config_manager.py
+│   │   └── pipeline_task_manager.py
+│   │
+│   ├── service/                          # 数据原子服务层
+│   │   ├── ... (对应每个实体的 CRUD Service)
+│   │
+│   ├── schema/                           # [DTO] 数据库传输对象
+│   │   ├── ... (对应数据库表的 Pydantic Model)
+│   │
+│   └── table/                            # SQLAlchemy ORM 模型
+│       └── ...
+│
+└── main_server.py                        # 程序入口
+## 3. 通用定义 (Common Definitions)
+### 3.1 基础 Schema (api/schema/base_schema.py)
+```python
+from pydantic import BaseModel
+from typing import Optional
 
+class IDRequest(BaseModel):
+    id: int | str
 
-# 20251229
-1、创建instruction gen步骤的指令数据存储表及服务
-2、数据表中缺少instruction字段，后续优化
-3、指令数据前端的修改删除并没有持久化存储到数据中，后续优化
+class PageRequest(BaseModel):
+    page: int = 1
+    page_size: int = 20
+    keyword: Optional[str] = None
+```
+## 4. 模块详细设计 (Module Specifications)
+### 4.1 仪表盘模块 (Dashboard)
+职责: 提供全局统计信息和最近任务概览。
+#### Router (api/routers/dashboard_router.py)
+```python
+# GET /api/dashboard/stats
+async def get_stats(manager: DashboardManager): pass
 
+# GET /api/dashboard/recent-jobs
+async def get_recent_jobs(limit: int, manager: DashboardManager): pass
+```
+#### Manager (core/manager/dashboard_manager.py)
+```python
+class DashboardManager:
+    async def get_global_stats(self) -> dict:
+        """
+        聚合统计：
+        1. 调用 PdfDocumentService.count_all()
+        2. 调用 DocumentChunkService.count_all()
+        3. 调用 PipelineTaskService.count_running()
+        """
+        pass
 
-# 20251230
-1、清空指令数据更新任务状态，使得可以重新生成
-2、更新instruction data优化，核心难点为更新references字段数据
-3、新增llm_config配置table service  server
-4、instruction ui中配置新增编辑删除llm_config，每个doc_id选择llm配置（标题生成和指令生成配置），import data卡片的右上角也可以进行选择配置
-5、新增了llm_config配置，各种ui对接
-6、在执行操作的时候，如果用到了某个llm配置，不能修改改配置，否则会产生冲突
+    async def get_recent_jobs(self, limit: int) -> list:
+        """调用 PipelineTaskService 获取最新记录"""
+        pass
+```
+### 4.2 知识库模块 (Knowledge Base)
+职责: 管理知识库元数据及其关联的文档。
+#### Schema (api/schema/knowledge_base_schema.py)
+```python
+KBCreateRequest: name, desc, embedding_model, settings
 
-# 20251231
-1、instruction 步骤生成的指令数据有待优化，llm请求报错和并发问题，效率太低
-2、新增状态过滤机制
-3、新增dashboard ui
-4、data import界面提pdf2md步骤并发情况下状态更新不及时，需要等待所有提取完成以后一起更新，需要优化
+KBUpdateRequest: id, name, desc, settings
 
-# 20260103
-1、新增chunk_index_description字段，以方便前端显示和documents chunk相对应的chunk编号在instruction gen页面的instruction chunk显示菜单栏
-2、优化instruction生成算法：减少每章生成无法回答的数目（从2减少到1），使用difflib去匹配无法回答的低成本验证（二次低成本验证数据质量，防止rag数据出现幻觉）
-3、其他优化
+KBDeleteRequest: id
 
-# 20260109
-1、llm_config表格中新增model_type字段，用于兼容gpt、embedding、rerank等llm模型
+KBListRequest: page, size, keyword
 
-2、新增多知识库相关的表格定义，以管理维度多个知识库（下午来了开始）
-    尚未开始
-    使用关联表还是外键：
-        文件池没有知识库的概念，所有的文件在这里进行处理：pdf解析、切分、指令生成、语义向量
-        可以指定某个文件属于某个知识库，也可以在知识库层面拉取某个文件
-        如果某个文件只属于某个知识库，使用外键最简单直接。
-        如果某个文件可以属于多个知识库，使用关联表最直接。
-3、wangeng中检索增强生成相关代码更新，以适配多知识库结构（下午来了开始）
-    已优化embedding相关的配置
-    待优化rerank相关的配置
-4、wangeng agent框架相关更新（预计明天开始1.10）
-    尚未开始
+KBUpdateDocsRequest: kb_id, doc_ids: List[int]
+```
+#### Router (api/routers/knowledge_base_router.py)
+```python
+# POST /api/knowledge_base/create
+async def create_kb(req: KBCreateRequest, manager: KnowledgeBaseManager): pass
 
-# 20260111
-1、完成知识库的管理操作
-2、完成知识库新增、删除文件（同步数据库pdf_documents和qdrant元数据）
-3、如果在语义嵌入之前某个文件已经分配到了知识库，则嵌入向量直接入库
-4、知识库删除同步更新数据库kb_id字段和qdrant元数据
-5、未完成：
-    同步指令数据（目前只做了原始数据块，还没有对指令数据做同步）
-    其他菜单栏目没有同步新增知识库过滤条件
-    rag测试页面需要进行知识库的选择
-    chat智能体创建
+# POST /api/knowledge_base/delete
+async def delete_kb(req: KBDeleteRequest, manager: KnowledgeBaseManager): pass
+
+# POST /api/knowledge_base/update
+async def update_kb(req: KBUpdateRequest, manager: KnowledgeBaseManager): pass
+
+# POST /api/knowledge_base/list
+async def list_kb(req: KBListRequest, manager: KnowledgeBaseManager): pass
+
+# POST /api/knowledge_base/update_docs
+async def bind_docs_to_kb(req: KBUpdateDocsRequest, manager: KnowledgeBaseManager): pass
+```
+#### Manager (core/manager/knowledge_base_manager.py)
+```python
+class KnowledgeBaseManager:
+    async def create_kb(self, dto: KnowledgeBaseDTO) -> int:
+        """创建记录并初始化默认配置"""
+        pass
+
+    async def delete_kb(self, kb_id: int) -> bool:
+        """
+        1. 检查关联文档
+        2. 解绑文档 (PdfService.unbind_kb)
+        3. 清理远程向量 (EmbeddingManager.delete_collection)
+        4. 物理删除记录
+        """
+        pass
+
+    async def bind_docs(self, kb_id: int, doc_ids: List[int]):
+        """批量更新文档的 kb_id 字段"""
+        pass
+```
+### 4.3 PDF 文档模块 (PDF Document)
+职责: 处理 PDF 上传、解析 (PDF2MD)、元数据管理、内容修正。
+#### Schema (api/schema/pdf_document_schema.py)
+```python
+DocContentSaveRequest: doc_id, content
+
+DocExportRequest: kb_id (导出该KB下所有书)
+
+Pdf2MdConvertRequest: doc_id
+```
+#### Router (api/routers/pdf_document_router.py)
+```python
+# POST /api/pdf_document/list
+async def list_docs(req: DocListRequest, manager: PdfDocumentManager): pass
+
+# POST /api/pdf_document/delete
+async def delete_doc(req: DocDeleteRequest, manager: PdfDocumentManager): pass
+
+# POST /api/pdf_document/update
+async def update_doc(req: DocUpdateRequest, manager: PdfDocumentManager): pass
+
+# POST /api/pdf_document/unassigned
+async def get_unassigned_docs(req: PageRequest, manager: PdfDocumentManager): pass
+
+# GET /api/pdf_document/content?doc_id=...
+async def get_content(doc_id: int, manager: PdfDocumentManager): pass
+
+# POST /api/pdf_document/content/save
+async def save_content(req: DocContentSaveRequest, manager: PdfDocumentManager): pass
+
+# GET /api/pdf_document/statistics?doc_id=...
+async def get_stats(doc_id: int, manager: PdfDocumentManager): pass
+
+# GET /api/pdf_document/chunk_count?doc_id=...
+async def get_chunk_count(doc_id: int, manager: PdfDocumentManager): pass
+
+# POST /api/pdf_document/get_doc_count_by_kb_id
+async def count_by_kb(req: IDRequest, manager: PdfDocumentManager): pass
+
+# POST /api/pdf_document/export_books_jsonl
+async def export_books(req: DocExportRequest, manager: PdfDocumentManager): pass
+
+# POST /api/pdf2md/convert
+async def run_pdf2md(req: Pdf2MdConvertRequest, manager: PdfDocumentManager): pass
+```
+#### Manager (core/manager/pdf_document_manager.py)
+```
+class PdfDocumentManager:
+    async def trigger_parse_task(self, doc_id: int):
+        """
+        1. 创建/重置 PipelineTask (TaskType.MINERU_EXTRACT)
+        2. 异步调用 GPU/Worker 进行解析
+        """
+        pass
+
+    async def get_doc_content(self, doc_id: int) -> str:
+        """从 MinIO 或 DB 读取 Markdown 全文"""
+        pass
+
+    async def save_doc_content(self, doc_id: int, content: str):
+        """
+        1. 更新 Markdown 内容
+        2. 标记文档状态为 '需重新切片'
+        """
+        pass
+
+    async def delete_doc(self, doc_id: int):
+        """级联删除：Task -> Chunks -> Instructions -> Doc"""
+        pass
+```
+### 4.4 文档切片模块 (Document Chunk)
+职责: 切片列表、手动修正、触发切片任务、导出。
+#### Router (api/routers/document_chunk_router.py)
+```python
+# POST /api/document_chunk/list
+async def list_chunks(req: ChunkListRequest, manager: DocumentChunkManager): pass
+
+# POST /api/document_chunk/update
+async def update_chunk(req: ChunkUpdateRequest, manager: DocumentChunkManager): pass
+
+# POST /api/document_chunk/delete
+# POST /api/document_chunk/delete_by_id (别名)
+async def delete_chunk(req: ChunkDeleteRequest, manager: DocumentChunkManager): pass
+
+# GET /api/document_chunk/download/{doc_id}
+async def download_json(doc_id: int, manager: DocumentChunkManager): pass
+
+# POST /api/document_chunk/download/stream-pretrain-by-kb
+async def stream_pretrain_data(req: IDRequest, manager: DocumentChunkManager): pass
+
+# POST /api/chunk/run
+async def run_chunking(req: ChunkRunRequest, manager: DocumentChunkManager): pass
+```
+#### Manager (core/manager/document_chunk_manager.py)
+```python
+class DocumentChunkManager:
+    async def process_file_chunking(self, doc_id: int):
+        """
+        [核心业务]
+        1. 读取 MD 内容
+        2. 执行切片算法
+        3. Service.batch_save_chunks
+        4. 自动触发 Embedding (可选)
+        """
+        pass
+
+    async def update_chunk(self, chunk_id: str, content: str):
+        """
+        1. 更新 DB 内容
+        2. 调用 EmbeddingManager.sync_single_chunk 更新向量
+        """
+        pass
+```
+### 4.5 指令集模块 (Instruction)
+职责: LLM 问答对生成、管理与导出。
+#### Router (api/routers/instruction_router.py)
+```python
+# POST /api/instruction/list
+async def list_instructions(req: InstListRequest, manager: InstructionManager): pass
+
+# POST /api/instruction/run
+async def run_generation(req: InstRunRequest, manager: InstructionManager): pass
+
+# POST /api/instruction/update
+async def update_instruction(req: InstUpdateRequest, manager: InstructionManager): pass
+
+# POST /api/instruction/delete
+async def delete_instruction(req: IDRequest, manager: InstructionManager): pass
+
+# POST /api/instruction/clear_by_doc
+async def clear_by_doc(req: IDRequest, manager: InstructionManager): pass
+
+# GET /api/instruction/download_jsonl/{doc_id}
+# GET /api/instruction/download_jsonl_all
+# POST /api/instruction/download_jsonl_by_kb
+async def download_dispatch(..., manager: InstructionManager): pass
+```
+#### Manager (core/manager/instruction_manager.py)
+```python
+class InstructionManager:
+    async def trigger_generation(self, doc_id: int, config_id: int):
+        """
+        1. 获取 DocumentChunks
+        2. 组装 Prompt
+        3. 异步调用 LLM 生成
+        4. 保存结果到 instruction_datum 表
+        """
+        pass
+```
+### 4.6 向量与检索模块 (Embedding & Retrieval)
+职责: 向量化任务管理、向量库 CRUD、混合检索。
+#### Router (api/routers/embedding_router.py)
+```python
+# POST /api/embedding/run
+async def run_embedding_task(req: IDRequest, manager: EmbeddingManager): pass
+
+# POST /api/vector/update
+async def update_vector(req: VectorUpdateRequest, manager: EmbeddingManager): pass
+
+# POST /api/vector/search (或 /api/retrieval/search)
+async def search_vector(req: SearchRequest, manager: RetrievalManager): pass
+```
+#### Manager (core/manager/embedding_manager.py)
+```python
+class EmbeddingManager:
+    async def run_doc_embedding(self, doc_id: int):
+        """
+        1. 获取未索引的 Chunks + Instructions
+        2. 分批调用 Embedding 模型
+        3. Upsert 到 Qdrant
+        4. 更新 DB is_indexed=True
+        """
+        pass
+
+class RetrievalManager:
+    async def hybrid_search(self, query: str, kb_ids: List[int], top_k: int):
+        """
+        1. Embedding Query
+        2. Vector Search (Semantic)
+        3. Keyword Search (Lexical, Optional)
+        4. Rerank Results
+        """
+        pass
+```
+### 4.7 任务流水线模块 (Pipeline Task)
+职责: 查询异步任务状态。
+#### Router (api/routers/pipeline_task_router.py)
+```python
+# GET /api/pipeline/tasks?doc_id=...
+async def get_tasks(doc_id: int, manager: PipelineTaskManager): pass
+```
+#### Service (core/service/pipeline_task_service.py)
+```python
+class PipelineTaskService:
+    async def get_tasks_by_doc(self, doc_id: int) -> List[PipelineTask]: pass
+    async def update_status(self, task_id: int, status: int, detail: str): pass
+```
+### 4.8 LLM 配置模块 (LLM Config)
+职责: 管理模型密钥、API地址、类型。
+#### Router (api/routers/llm_config_router.py)
+```python
+# POST /api/llm_config/list
+# POST /api/llm_config/create
+# POST /api/llm_config/update
+# POST /api/llm_config/delete
+# POST /api/llm_config/type_list
+# POST /api/llm_config/provider_list
+```
+
+### 4.9 存储模块 (Storage)
+职责: 文件上传与 URL 签名。
+#### Router (api/routers/storage_router.py)
+```python
+# POST /api/storage/upload
+async def upload_file(file: UploadFile, manager: StorageManager): pass
+
+# POST /api/storage/url
+async def get_presigned_url(req: PathRequest, manager: StorageManager): pass
+```

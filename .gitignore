@@ -2,7 +2,7 @@ problems.txt
 *.pyc
 *.yaml
 !docker-compose.yaml
-!config/yaml/*.yaml.template
+!configs/*.yaml.template
 logs/
 docs/
 .env

@@ -1,0 +1,6 @@
+host: "postgres_test" 
+port: "5433"
+username: "admin"
+password: "password123"
+database: "file_metadata"
+database_type: postgres

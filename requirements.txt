@@ -7,4 +7,17 @@ requests
 pypdf
 pymupdf
 minio
-git+https://github.com/wytyl13/agent.git@weiyutao
+openai
+llama-index-core
+asyncpg
+tabulate
+lxml 
+html5lib
+colorlog
+pandas
+
+# pytest
+pytest
+pytest-asyncio 
+aiosqlite 
+greenlet

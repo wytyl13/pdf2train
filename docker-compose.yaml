@@ -34,18 +34,55 @@ services:
     networks:
       - soft_default
 
+  postgres_test:
+    image: postgres:16-alpine
+    container_name: postgres_test
+    restart: always
+    ports:
+      # ⚠️ 注意：宿主机端口改为 5433，避免和生产库 5432 冲突
+      # 容器内部端口依然是 5432
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      # 🔥 专门的测试库名
+      POSTGRES_DB: test_db
+    # 注意：这里故意没有挂载 volumes，保证每次容器重置都是干净的环境
+    # 如果你确实需要持久化测试数据，可以取消注释下面两行：
+    # volumes:
+    #   - ${HOME}/soft/postgresql_test_data:/var/lib/postgresql/data
+    networks:
+      - soft_default
+
   # 4. 后端服务 pdf2train
   pdf2train:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
     container_name: pdf2train
     restart: always
+    working_dir: /workspace/pdf2train
+    command: >
+      sh -c "python -m pdf2train.core.table.init_tables -n &&
+      uvicorn pdf2train.api.server.main_server:app --host 0.0.0.0 --port 8000 --reload"
+
     ports:
       - "9039:8000"
     volumes:
-      - .:/app
+      - ./:/workspace/pdf2train
+    environment:
+      - PYTHONPATH=/workspace/pdf2train/src
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       - postgres
       - minio
+      - postgres_test
     networks:
       - soft_default
 
