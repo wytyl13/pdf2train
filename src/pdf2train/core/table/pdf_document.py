@@ -90,7 +90,7 @@ class PdfDocument(Base):
         "PipelineTask", 
         back_populates="document", 
         order_by="PipelineTask.step_order", 
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )
     knowledge_base = relationship("KnowledgeBase", back_populates="documents")
     

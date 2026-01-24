@@ -54,15 +54,7 @@ class Pdf2MdManager:
         extract_task = next((t for t in tasks if t.task_type == TaskType.MINERU_EXTRACT.value), None)
         
         if not extract_task:
-            # 如果不存在，创建一个
-            task_id = await self.task_service.create(PipelineTaskCoreDTO(
-                doc_id=doc_id,
-                task_type=TaskType.MINERU_EXTRACT.value,
-                step_order=1,
-                task_name="PDF文档解析",
-                status=TaskLifecycle.PENDING.value,
-                input_params={"is_ocr": is_ocr, "split_pages": split_pages}
-            ))
+            raise ValueError("Pipeline task not initialized")
         else:
             task_id = extract_task.id
             # 重置状态

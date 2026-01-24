@@ -38,6 +38,9 @@ router schema的设计使用泛RPC风格（POST-only + JSON Request Object）
 dto层面可以设置前端渲染的富文本数据，但是不应该设置前端传递过来的参数或者前端的业务参数
 比如page page_size不应该在dto层面设置，但是前端需要额外的字段，比如专为前端渲染或者二次请求设计的
 而不是为了前端的其余操作等设置的。
+
+service层的分页查询返回字典 {"items": table_object, "total": int, "page": int, "size": int}
+service层的分页查询请求 {"filter_dto": filter_dto_object, "page": int, "page_size": int}
 """
 
 from typing import Optional, Any

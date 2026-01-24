@@ -54,6 +54,9 @@ class PdfDocRichDTO(PdfDocCoreDTO):
     cover_url: Optional[str] = None
     kb_name: Optional[str] = "未关联知识库"
     file_size_display: Optional[str] = None
+    # 前端专用显示字段
+    chunks_count: Optional[int] = None
+    instruction_count: Optional[int] = None
 
 
 class PdfDocUpdateDTO(BaseModel):

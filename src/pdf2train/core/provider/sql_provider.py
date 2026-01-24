@@ -468,7 +468,7 @@ class SqlProvider(
                         return True
                     return False
             except Exception as e:
-                error_info = f"Failed to delete record: {record_id}"
+                error_info = f"Failed to delete record: {record_id} \n {str(e)}"
                 self.logger.error(error_info)
                 raise ValueError(error_info) from e
     
@@ -789,7 +789,7 @@ class SqlProvider(
         fields: Optional[List[str]] = None,
         exclude_fields: Optional[List[str]] = None,
         date_range: Optional[Dict[str, str]] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Any]:
         """
         增强版条件查询函数 - 支持精确到秒的时间查询
         
@@ -1021,7 +1021,7 @@ class SqlProvider(
                     "items": records,
                     "total": total,
                     "page": page,
-                    "size": page_size
+                    "page_size": page_size
                 }
             except Exception as e:
                 self.logger.error(f"分页查询异常: {str(e)}")

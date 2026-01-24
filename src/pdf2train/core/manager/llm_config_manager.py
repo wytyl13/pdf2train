@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional
 
 # 引入下层依赖
 from pdf2train.core.table.llm_enum import LLMProvider, ModelType
+from pdf2train.core.table.llm_config import LLMConfig
 from pdf2train.core.service.llm_config_service import LLMConfigService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
 from pdf2train.core.schema.llm_config_dto import LLMConfigCoreDTO, LLMConfigUpdateDTO, ResetDefaulExceptDTO
@@ -82,12 +83,17 @@ class LLMConfigManager:
     async def delete_config(self, config_id: int) -> bool:
         return await self.service.delete(config_id)
 
-    async def get_config_list(self, page: int, page_size: int, model_type: Optional[ModelType] = None):
+    async def get_config_list(
+        self, 
+        page: int, 
+        page_size: int, 
+        model_type: Optional[ModelType] = None
+    ) -> Dict[str, List[LLMConfig] | int]:
         """
         [业务] 获取列表 (含脱敏)
         """
         condition = {"model_type": model_type.value} if model_type else {}
-        result = await self.service.list_paginated(page, page_size, condition)
+        result = await self.service.search_paginated(page, page_size, condition)
         
         # 对结果集进行脱敏
         items = result.get("items", [])

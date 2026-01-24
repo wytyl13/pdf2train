@@ -138,7 +138,7 @@ class PdfDocumentService:
             complex_filters.append(PdfDocument.tasks.any(and_(*task_conditions)))
 
         # 4. 执行查询
-        result = await self.sql_provider.get_records_paginated(
+        return await self.sql_provider.get_records_paginated(
             page=page,
             page_size=page_size,
             condition={}, 
@@ -146,8 +146,6 @@ class PdfDocumentService:
             order_by=PdfDocument.create_time.desc()
         )
 
-        return result["items"], result["total"]
-    
     async def update_kb_by_ids(self, ids: List[int], new_kb_id: Optional[Union[int, None]] = None):
         try:
             result = None
@@ -215,6 +213,20 @@ class PdfDocumentService:
                 
                 # 获取结果 scalar() 返回第一行第一列的值，即 count 数值
                 return result.scalar() or 0
+        except Exception as e:
+            raise e
+        
+    async def get_doc_ids_by_kb_ids(self, kb_ids: List[int]) -> List[int]:
+        """
+        根据知识库ID列表，批量获取对应的文档ID列表
+        """
+        if not kb_ids:
+            return []
+        try:
+            async with self.sql_provider.get_db_session() as session:
+                stmt = select(PdfDocument.id).where(PdfDocument.kb_id.in_(kb_ids))
+                result = await session.execute(stmt)
+                return list(result.scalars().all())
         except Exception as e:
             raise e
     

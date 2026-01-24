@@ -86,7 +86,7 @@ class LLMConfigService:
             self.logger.error(traceback.format_exc())
             return None
 
-    async def list_paginated(self, page: int, page_size: int, condition: Dict[str, Any]):
+    async def search_paginated(self, page: int, page_size: int, condition: Dict[str, Any]):
         """[DB] 分页查询，默认将 is_default=True 的排在前面"""
         return await self.sql_provider.get_records_paginated(
             page=page,

@@ -38,34 +38,7 @@ class PipelineTaskManager:
         [业务编排] 为新文档初始化默认流水线
         定义了步骤的顺序、名称和初始状态
         """
-        # 1. 定义标准流程 (Recipe)
-        # 这里是修改流程步骤的唯一入口
-        default_flow = [
-            {"type": TaskType.MINERU_EXTRACT, "name": "PDF文档解析"},
-            {"type": TaskType.MARKDOWN_CHUNK, "name": "智能切片处理"},
-            {"type": TaskType.INSTRUCTION_GEN, "name": "QA指令生成"},
-            {"type": TaskType.QDRANT_INDEX, "name": "向量知识库索引"}
-        ]
-
-        # 2. 构建 DTO 列表
-        dtos = []
-        for index, step in enumerate(default_flow):
-            # 业务规则：第一个任务 Pending (准备执行)，后续任务 Waiting (等待前置)
-            status = TaskLifecycle.PENDING.value if index == 0 else TaskLifecycle.WAITING_PARENT.value
-            
-            dto = PipelineTaskCoreDTO(
-                doc_id=doc_id,
-                task_type=step["type"].value,
-                step_order=index + 1,
-                task_name=step["name"],
-                status=status,
-                detailed_status=0,
-                progress=0
-            )
-            dtos.append(dto)
-
-        # 3. 调用 Service 执行批量插入
-        return await self.service.create_batch(dtos)
+        return await self.service.init_tasks_for_document(doc_id)
 
     async def reset_processing_tasks_to_failed(self) -> int:
         """

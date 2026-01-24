@@ -25,6 +25,9 @@ from pdf2train.api.routers import pipeline_task_router
 from pdf2train.api.routers import pdf_document_router
 from pdf2train.api.routers import storage_router
 from pdf2train.api.routers import pdf2md_router
+from pdf2train.api.routers import document_chunk_router
+from pdf2train.api.routers import instruction_datum_router
+from pdf2train.api.routers import chunk_router
 
 from pdf2train.core.service.pipeline_task_service import PipelineTaskService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
@@ -111,6 +114,9 @@ app.include_router(pipeline_task_router.router)
 app.include_router(storage_router.router)
 app.include_router(pipeline_task_router.router_dashboard)
 app.include_router(pdf2md_router.router)
+app.include_router(document_chunk_router.router)
+app.include_router(instruction_datum_router.router)
+app.include_router(chunk_router.router)
 
 
 @app.get("/")

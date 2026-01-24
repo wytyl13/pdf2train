@@ -219,6 +219,7 @@ async def update_document(self, doc_id: int, data: Dict[str, Any], confirm_sync:
 
 
 # 项目重构前后端对接
+## 基础重构
 1、data import 页面过滤筛选查看那doc list
 2、查看某个doc的原始文件
 3、下载某个doc的原始文件
@@ -226,4 +227,28 @@ async def update_document(self, doc_id: int, data: Dict[str, Any], confirm_sync:
 5、编辑某个doc的md文件
 6、正常显示某个doc的所有数据
 7、更新某个doc配置信息（后台还需要完善更新模型配置、知识库配置以后对后续步骤的影响）
-8、pdf解析操作，但是没有处理pdf2train函数中同步更新父文档的代码，需要同步更新父文档的progress
+
+
+## 核心操作步骤重构
+### pdf解析操作
+1、完成pdf解析操作的接口，并重构为单一功能职责架构
+1、pdf解析操作，但是没有处理pdf2train函数中同步更新父文档的代码，需要同步更新父文档的progress
+2、每次执行pdf解析操作的时候需要重置doc_id层面的状态，但是没有设计一套确定的重置规则
+### chunk操作，基本完成
+
+
+# 20260124
+1、完成pdf_document_manager 基本的删除  新增操作
+2、完成instruction_datum_manager基本的操作，但是没有优化批量删除、修改、单个删除对应的后续向量数据库同步操作
+需要设计这个后续同步操作放在哪里合适？
+3、完成document_chunk_manager基本的操作，同样需要考虑后续的向量数据库同步方法
+4、完成chunk_manager操作
+5、优化pipeline_task_manager
+6、需要优化向量数据库的操作（删除，新增删除接口）
+7、优化检索操作
+8、需要完成instruction_gen_manager模块操作
+9、需要完成embedding_manager模块操作
+10、需要完成步骤progress更新和对应的doc progress更新
+
+
+

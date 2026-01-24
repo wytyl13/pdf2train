@@ -16,13 +16,21 @@ from pathlib import Path
 from dotenv import dotenv_values
 from urllib.parse import quote
 from datetime import datetime
+import asyncio
 
+from pdf2train.core.table.pdf_document import PdfDocument
+from pdf2train.core.table.pipeline_task import PipelineTask
 from pdf2train.core.schema.pdf_document_dto import PdfDocCoreDTO, PdfDocUpdateDTO, PdfDocFilterDTO, PdfDocRichDTO
 from pdf2train.utils.pdf_utils import PdfUtils
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
 from pdf2train.core.service.minio_service import MinioService
 from pdf2train.core.service.llm_config_service import LLMConfigService
 from pdf2train.core.service.knowledge_base_service import KnowledgeBaseService
+from pdf2train.core.service.document_chunk_service import DocumentChunkService
+from pdf2train.core.service.instruction_datum_service import InstructionDatumService
+from pdf2train.core.service.pipeline_task_service import PipelineTaskService
+from pdf2train.core.schema.base_schema import PageResult
+
 from pdf2train.core.table.llm_enum import ModelType
 from pdf2train.core.config import core_config
 
@@ -37,13 +45,20 @@ class PdfDocumentManager:
         pdf_service: PdfDocumentService, 
         minio_service: MinioService,
         llm_config_service: LLMConfigService,
-        kb_service: KnowledgeBaseService
+        kb_service: KnowledgeBaseService,
+        document_chunk_service: DocumentChunkService,
+        instruction_datum_service: InstructionDatumService,
+        pipeline_task_service: PipelineTaskService
     ):
         # 在fastapi中按需加载manager，而manager依赖pdf_service，所以该服务是用的时候才被加载的
         self.pdf_service = pdf_service 
         self.minio_service = minio_service
         self.llm_config_service = llm_config_service
         self.kb_service = kb_service
+        self.document_chunk_service = document_chunk_service
+        self.instruction_datum_service = instruction_datum_service
+        self.pipeline_task_service = pipeline_task_service
+        
         self.minio_base_url = MINIO_BASE_URL
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -59,31 +74,50 @@ class PdfDocumentManager:
             size /= 1024
         return f"{size:.2f} TB"
 
-    async def _enrich_doc_list(self, docs: List[Any]) -> List[PdfDocRichDTO]:
+    async def _enrich_doc_list(self, docs: List[PdfDocument]) -> List[PdfDocRichDTO]:
         """
         返回 List[PdfDocResponse] 对象列表
         """
         if not docs:
             return []
 
+        doc_ids = [doc.id for doc in docs]
         # 1. 提取所有需要查询的 KB ID
         # 注意：这里假设 doc 是 ORM 对象，直接访问属性
         kb_ids_to_query = {doc.kb_id for doc in docs if doc.kb_id}
 
-        # 2. 调用 KnowledgeBaseService 批量获取名称 (解耦)
-        kb_name_map = {}
-        if kb_ids_to_query:
-            # 这一步调用的是 Service，避免了 Manager 间的循环依赖
-            kb_name_map = await self.kb_service.get_names_by_ids(kb_ids_to_query)
+        # 2. 并行执行所有 IO 密集型任务
+        # 任务 A: 批量获取 KB 名称
+        task_kb = self.kb_service.get_names_by_ids(list(kb_ids_to_query)) if kb_ids_to_query else asyncio.sleep(0, result={})
 
-        # 3. 获取默认配置 (只需查一次)
-        default_embedding = None
-        try:
-            default_embedding = await self.llm_config_service.get_active_config_name(
-                model_type=ModelType.EMBEDDING.value
-            )
-        except Exception as e:
-            self.logger.warning(f"获取默认Embedding配置失败: {e}")
+        # 任务 B: 批量统计 Chunk 数量 (需要在 Service 层新增方法) 
+        task_chunk_counts = self.document_chunk_service.get_counts_by_doc_ids(doc_ids)
+
+        # 任务 C: 批量统计 Instruction 数量 (需要在 Service 层新增方法)
+        task_instr_counts = self.instruction_datum_service.get_counts_by_doc_ids(doc_ids)
+
+        # 任务 D: 获取默认 Embedding 配置
+        task_config = self.llm_config_service.get_active_config_name(model_type=ModelType.EMBEDDING.value)
+
+        # 并发执行并等待所有结果
+        results = await asyncio.gather(
+            task_kb, 
+            task_chunk_counts, 
+            task_instr_counts, 
+            task_config, 
+            return_exceptions=True # 防止某个任务报错导致整体崩溃
+        )
+
+        # === 3. 解包结果 ===
+        kb_name_map = results[0] if not isinstance(results[0], Exception) else {}
+        # 结果是一个字典: {doc_id: count}
+        chunk_count_map = results[1] if not isinstance(results[1], Exception) else {} 
+        instr_count_map = results[2] if not isinstance(results[2], Exception) else {}
+        
+        default_embedding = results[3]
+        if isinstance(default_embedding, Exception):
+            self.logger.warning(f"获取默认Embedding配置失败: {default_embedding}")
+            default_embedding = None
 
         base_url = self._get_base_url()
         result_list = []
@@ -94,16 +128,17 @@ class PdfDocumentManager:
             # 使用 model_validate 读取 ORM 对象，转为字典方便修改
             # 这一步确保了 id, status, create_time 等基础字段的正确性
             core_data = PdfDocCoreDTO.model_validate(doc).model_dump()
-
             # B. 计算虚字段 (Computed Fields)
             
             # 知识库名称
             kb_name = kb_name_map.get(doc.kb_id) or "未关联知识库"
 
+            # 直接从 map 中 O(1) 获取数量，没有 DB 调用
+            chunk_count = chunk_count_map.get(doc.id, 0)
+            instruction_count = instr_count_map.get(doc.id, 0)
+
             # 下载链接拼接
-            download_url = None
-            if doc.bucket_name and doc.object_name:
-                download_url = f"{base_url}/{doc.bucket_name}/{doc.object_name}"
+            download_url = f"{base_url}/{doc.bucket_name}/{doc.object_name}" if doc.bucket_name and doc.object_name else None
 
             # 封面链接拼接
             cover_url = None
@@ -120,8 +155,6 @@ class PdfDocumentManager:
             file_size_display = self._format_size(doc.file_size)
 
             # 补全 LLM 配置
-            embedding_config = core_data.get('embedding_llm_config') or default_embedding
-            
             if not core_data.get('embedding_llm_config'):
                 # core_data和PdfDocRichDTO重复字段这里处理
                 core_data['embedding_llm_config'] = default_embedding
@@ -132,7 +165,9 @@ class PdfDocumentManager:
                 kb_name=kb_name,
                 download_url=download_url,
                 cover_url=cover_url,
-                file_size_display=file_size_display
+                file_size_display=file_size_display,
+                chunks_count=chunk_count,
+                instruction_count=instruction_count,
             )
             
             result_list.append(rich_dto)
@@ -186,8 +221,8 @@ class PdfDocumentManager:
         if not ext: ext = ".pdf"
         
         # 生成唯一路径
-        unique_name = f"{uuid.uuid4()}{ext}"
-        object_name = f"kb_{kb_id}/{unique_name}" if kb_id else f"common/{unique_name}"
+        object_name = f"{uuid.uuid4()}{ext}"
+        # object_name = f"kb_{kb_id}/{unique_name}" if kb_id else f"common/{unique_name}"
 
         # 上传主文件 (将提取到的 meta 注入 MinIO 属性中)
         await self.minio_service.upload_file_stream(
@@ -237,27 +272,30 @@ class PdfDocumentManager:
         # 6. 调用 Service 创建
         new_id = await self.pdf_service.create(doc_dto)
         
+        # 7. 初始化各任务步骤
+        init_status = await self.pipeline_task_service.init_tasks_for_document(new_id)
+        
         # 7. 返回完整对象
         return await self.pdf_service.get_by_id(new_id)
 
-    async def get_list_documents(self, page: int, size: int, filter_dto: PdfDocFilterDTO) -> Dict[str, Union[PdfDocRichDTO, int]]:
+    async def get_list_documents(self, page: int, size: int, filter_dto: PdfDocFilterDTO) -> PageResult[PdfDocRichDTO]:
         """
         获取文档列表
         Manager 可以在这里做一些 VO 转换，或者直接返回
         """
         # 1. 获取原始数据库数据
-        items, total = await self.pdf_service.search_paginated(page, size, filter_dto)
+        db_result: Dict[str, List[PdfDocument] | int] = await self.pdf_service.search_paginated(page, size, filter_dto)
 
         # 2. 后处理为富文本数据
-        result: List[PdfDocRichDTO] = await self._enrich_doc_list(items)
+        items_rich_dto: List[PdfDocRichDTO] = await self._enrich_doc_list(db_result["items"])
         
-        # 返回字典数据给前端
-        return {
-            "items": result,
-            "total": total,
-            "page": page,
-            "size": size
-        }
+        # 3. 返回更新数据
+        return PageResult[PdfDocRichDTO](
+            items=items_rich_dto,
+            total=db_result["total"],
+            page=db_result["page"],
+            page_size=db_result["page_size"]
+        )
 
     async def update(self,doc_id: int, update_dto: PdfDocUpdateDTO):
         """
@@ -278,19 +316,121 @@ class PdfDocumentManager:
     async def delete(self, doc_id: int):
         """删除文档 (联动删除 MinIO)"""
         # 1. 先查
-        doc = await self.pdf_service.get_by_id(doc_id)
+        doc = await self.pdf_service.get_with_relations(doc_id, relations=["tasks"])
         if not doc:
             raise FileNotFoundError(f"文档 ID {doc_id} 不存在")
 
-        # 2. 删文件 (不抛异常，尽力而为)
         try:
-            await self.minio_service.remove_object(doc.bucket_name, doc.object_name)
-            # 如果有封面，也可以顺便删封面，这里略
+            # 2 委托 TaskService 清理中间产物 (Markdown/Index/Chunks)
+            await self.cleanup_tasks_files(doc_id)
+            
+            # 3. 清理提取产生的 Markdown 和 图片
+            extract_res = doc.latest_extract_result
+            if extract_res:
+                # A. 删除 Markdown 文件
+                if extract_res.md_bucket and extract_res.markdown_path:
+                    try:
+                        await self.minio_service.remove_object(extract_res.md_bucket, extract_res.markdown_path)
+                        self.logger.info(f"关联Markdown已删除: {extract_res.markdown_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Markdown删除失败: {e}")
+                        
+                # B. 删除图片目录
+                # 注意：MinIO 没有直接的 "删除文件夹" API，我们需要先列出该前缀下的所有文件，再循环删除
+                if extract_res.images_bucket and extract_res.images_path:
+                    try:
+                        # 1. 列出所有图片 (使用 existing MinioService method)
+                        # images_path 类似于 "images/doc_101/"
+                        objects = await self.minio_service.list_bucket_objects(
+                            extract_res.images_bucket, 
+                            prefix=extract_res.images_path
+                        )
+                        
+                        # 2. 循环删除
+                        count = 0
+                        for obj in objects:
+                            await self.minio_service.remove_object(extract_res.images_bucket, obj['object_name'])
+                            count += 1
+                        
+                        self.logger.info(f"关联图片已删除: {count} 张 (Prefix: {extract_res.images_path})")
+                    except Exception as e:
+                        self.logger.warning(f"图片目录删除失败: {e}")
+            
+            # 4. 清理数据库中的chunks
+            await self.document_chunk_service.delete_by_doc_id(doc_id)
+            
+            # 5. 清理instruction chunks
+            await self.instruction_datum_service.delete_by_doc_id(doc_id)
+            
+            # 6. 删除源文件
+            bucket = doc.bucket_name
+            obj_name = doc.object_name
+            if bucket and obj_name:
+                try:
+                    await self.minio_service.remove_object(bucket, obj_name)
+                    self.logger.info(f"源文件已删除: {obj_name}")
+                except Exception as e:
+                    self.logger.warning(f"源文件删除失败或文件不存在: {str(e)}")
+            
+            # 5. 删除封面图
+            if doc.cover:
+                try:
+                    await self.minio_service.remove_object(doc.cover.bucket, doc.cover.path)
+                    self.logger.info(f"封面图已删除: {doc.cover.full_path}")
+                except Exception as e:
+                    self.logger.warning(f"封面删除失败: {e}")
+            
+            # 6 删除第二步chunk生成的json
+            
+            # 7 删除嵌入向量
+            # collection_name = await self.update_doc_to_kb_service.get_collection_name_by_doc_id(doc_id=doc_id)
+            # if not collection_name:
+            #     self.logger.error(f"无法获取 doc_id={doc_id} 的 Collection Name，跳过向量删除")
+            # else:
+            #     try:
+            #         # 物理删除指令数据嵌入qdrant数据    
+            #         await self.update_doc_to_kb_service.delete_vector(
+            #             vector_delete_request=VectorDeleteRequest(
+            #                 collection_name=collection_name,
+            #                 filter_key="doc_kb_id",
+            #                 filter_value=doc_id
+            #             )
+            #         )
+            #     except Exception as ve:
+            #         self.logger.error(f"SQL已删，但向量删除失败: {ve}")
         except Exception as e:
-            print(f"Warning: Failed to delete file from MinIO: {e}")
+            import traceback
+            print(f"Warning: Failed to delete file from MinIO: {str(e)} \n {traceback.format_exc()}")
 
-        # 3. 删库
+        # 8. 删库，会自动删除对应的tasks
         return await self.pdf_service.delete(doc_id)
+
+    async def cleanup_tasks_files(self, doc_id: int):
+        """
+        [核心] 删除文档前，清理所有任务产生的中间文件
+        这个逻辑从 DocumentService 移到了这里，更符合职责划分
+        """
+        # 获取所有任务
+        tasks: List[PipelineTask] = await self.pipeline_task_service.get_by_doc_id(doc_id)
+        
+        for task in tasks:
+            result_data = task.result_data
+            if not result_data or not isinstance(result_data, dict):
+                continue
+
+            # 统一清理逻辑：遍历 result_data 里的特定 key
+            # 你可以根据 task_type 做 switch case，也可以做通用匹配
+            
+            # 1. 清理 bucket/path 组合，注意仅仅是清理了markdown这个路径，剩余的步骤的产出物也需要清理
+            bucket = result_data.get('bucket') or result_data.get('json_bucket')
+            path = result_data.get('path') or result_data.get('markdown_path') or result_data.get('chunks_json_path') or result_data.get('json_path')
+            
+            if bucket and path:
+                try:
+                    await self.minio_service.remove_object(bucket, path)
+                    self.logger.info(f"已清理中间文件: {bucket}/{path}")
+                except Exception as ex:
+                    self.logger.warning(f"清理文件失败: {ex}")
 
     async def export_books_data(
         self, 

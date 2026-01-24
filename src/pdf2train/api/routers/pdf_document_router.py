@@ -15,6 +15,7 @@ from pdf2train.api.schema.pdf_document_schema import (
     PaginatedDocRes, PdfDocDeleteReq, UnassignedReq,
     PdfDocExportBooksReq, PdfDocCountByKbReq
 )
+from pdf2train.core.schema.base_schema import PageResult
 from pdf2train.core.schema.pdf_document_dto import (
     PdfDocUpdateDTO, PdfDocFilterDTO, PdfDocRichDTO
 )
@@ -62,21 +63,18 @@ async def list_docs(
     manager: PdfDocumentManager = Depends(get_pdf_manager)
 ):
     """分页查询文档列表"""
+    
     try:
-        filter_dto = PdfDocFilterDTO(
-            kb_id=req.kb_id,
-            keyword=req.keyword,
-            status=req.status,
-            filter_step_type=req.filter_step_type,
-            filter_step_status=req.filter_step_status
-        )
-        
-        result: Dict[str, Union[PdfDocRichDTO, int]] = await manager.get_list_documents(req.page, req.page_size, filter_dto)
-        result: PaginatedDocRes = PaginatedDocRes(**result)
-        return make_response(True, "查询成功！", result)
+        dto_data_res: PageResult[PdfDocRichDTO] = await manager.get_list_documents(
+                req.page, 
+                req.page_size,
+                PdfDocFilterDTO(**req.model_dump(exclude_unset=True)), 
+            )
+        return make_response(success=True, message="查询成功", data=dto_data_res)
     except Exception as e:
-        return make_response(False, f"查询失败！{str(e)}", code=500)
-
+            import traceback
+            return make_response(False, f"查询失败！\n {str(e)} \n {traceback.format_exc()}", code=500)
+    
 @router.post("/update", response_model=dict)
 async def update_doc(
     req: PdfDocUpdateReq,

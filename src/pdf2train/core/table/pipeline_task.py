@@ -6,7 +6,7 @@
 @File    : pipeline_task.py
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, BigInteger, Text, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, BigInteger, Text, JSON, ForeignKey, UniqueConstraint
 from dataclasses import dataclass
 from sqlalchemy.orm import relationship
 from enum import IntEnum, unique
@@ -216,6 +216,10 @@ class PipelineTask(Base):
     start_time = Column(DateTime, nullable=True, comment='开始时间')
     end_time = Column(DateTime, nullable=True, comment='结束时间')
     cost_ms = Column(BigInteger, default=0, comment='耗时(毫秒)')
+
+    __table_args__ = (
+        UniqueConstraint('doc_id', 'task_type', name='uq_doc_task'),
+    )
 
     # === 7. 关联关系 ===
     document = relationship("PdfDocument", back_populates="tasks")

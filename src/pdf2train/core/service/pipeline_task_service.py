@@ -34,6 +34,40 @@ class PipelineTaskService:
             sql_config=sql_config 
         )
     
+    async def init_tasks_for_document(self, doc_id: int) -> bool:
+        """
+        [业务编排] 为新文档初始化默认流水线
+        定义了步骤的顺序、名称和初始状态
+        """
+        # 1. 定义标准流程 (Recipe)
+        # 这里是修改流程步骤的唯一入口
+        default_flow = [
+            {"type": TaskType.MINERU_EXTRACT, "name": "PDF文档解析"},
+            {"type": TaskType.MARKDOWN_CHUNK, "name": "智能切片处理"},
+            {"type": TaskType.INSTRUCTION_GEN, "name": "QA指令生成"},
+            {"type": TaskType.QDRANT_INDEX, "name": "向量知识库索引"}
+        ]
+
+        # 2. 构建 DTO 列表
+        dtos = []
+        for index, step in enumerate(default_flow):
+            # 业务规则：第一个任务 Pending (准备执行)，后续任务 Waiting (等待前置)
+            status = TaskLifecycle.PENDING.value if index == 0 else TaskLifecycle.WAITING_PARENT.value
+            
+            dto = PipelineTaskCoreDTO(
+                doc_id=doc_id,
+                task_type=step["type"].value,
+                step_order=index + 1,
+                task_name=step["name"],
+                status=status,
+                detailed_status=0,
+                progress=0
+            )
+            dtos.append(dto)
+
+        # 3. 调用 Service 执行批量插入
+        return await self.create_batch(dtos)
+    
     async def activate_next_step(self, doc_id: int, current_step_order: int) -> bool:
         """
         链式激活：当前步骤完成后，将下一个步骤从 WAITING_PARENT (-2) 变更为 PENDING (0)
@@ -41,7 +75,7 @@ class PipelineTaskService:
         try:
             # 1. 查找下一个任务
             next_order = current_step_order + 1
-            tasks = await self.sql_provider.get_record_by_condition({
+            tasks: List[PipelineTask] = await self.sql_provider.get_record_by_condition({
                 "doc_id": doc_id,
                 "step_order": next_order
             })
@@ -56,8 +90,8 @@ class PipelineTaskService:
                 end_time=datetime.now()
             )
             
-            if next_task.get("status") == TaskLifecycle.WAITING_PARENT.value:
-                result = await self.update(task_id=next_task.get("id"), dto=dto)
+            if next_task.status == TaskLifecycle.WAITING_PARENT.value:
+                result = await self.update(task_id=next_task.id, dto=dto)
                 if not result:
                     self.logger.error(f"激活下一步{next_order} (Task ID: {next_task.get('id')}) 失败: {e}")
                     return False
@@ -151,8 +185,9 @@ class PipelineTaskService:
             self.logger.error(f"查询文档任务失败 DocID {doc_id}: {e}")
             return []
         
-    async def get_by_id(self, task_id: int) -> Optional[PipelineTask]:
         """根据ID获取任务"""
+    
+    async def get_by_id(self, task_id: int) -> Optional[PipelineTask]:
         try:
             res = await self.sql_provider.get_record_by_condition({"id": task_id})
             return res[0] if res else None
