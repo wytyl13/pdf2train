@@ -37,8 +37,8 @@ class KBDeleteReq(BaseModel):
     
 class KBListReq(BaseModel):
     """知识库列表请求"""
-    page: int = Field(default=1, ge=1, description="页码")
-    page_size: int = Field(default=20, ge=1, le=100, description="每页数量")
+    page: Optional[int] = Field(default=None, ge=1, description="页码")
+    page_size: Optional[int] = Field(default=None, ge=1, le=100, description="每页数量")
     keyword: Optional[str] = Field(None, description="搜索关键词")
     
 class KBDetailReq(BaseModel):
@@ -47,7 +47,7 @@ class KBDetailReq(BaseModel):
 
 class KBUpdateDocsReq(BaseModel):
     """文档关联到知识库请求"""
-    kb_id: int = Field(..., description="知识库ID")
+    kb_id: Optional[int] = Field(default=None, description="知识库ID")
     doc_ids: List[int] = Field(..., description="文档ID列表")
 
     

@@ -37,7 +37,7 @@ class KnowledgeBaseService:
     
     async def update(self, kb_id: int, dto: KnowledgeBaseUpdateDTO) -> bool:
         """[DB] 更新记录"""
-        return await self.sql_provider.update_record(kb_id, dto.model_dump())
+        return await self.sql_provider.update_record(kb_id, dto.model_dump(exclude_unset=True))
     
     async def get_by_id(self, kb_id: int) -> Dict[str, Any]:
         """[DB] 获取单条记录"""
@@ -54,7 +54,7 @@ class KnowledgeBaseService:
         page: int, 
         page_size: int, 
         keyword: str = None
-    ) -> Dict[str, Any]:
+    ) -> List[KnowledgeBase]:
         """[DB] 分页列表查询"""
         condition = {}
             

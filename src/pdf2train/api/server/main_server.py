@@ -28,10 +28,13 @@ from pdf2train.api.routers import pdf2md_router
 from pdf2train.api.routers import document_chunk_router
 from pdf2train.api.routers import instruction_datum_router
 from pdf2train.api.routers import chunk_router
+from pdf2train.api.routers import instruction_gen_router
+from pdf2train.api.routers import qdrant_router
 
 from pdf2train.core.service.pipeline_task_service import PipelineTaskService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
 from pdf2train.core.manager.pipeline_task_manager import PipelineTaskManager
+
 
 logger = logging.getLogger("MainServer")
 
@@ -44,7 +47,8 @@ def get_pipeline_task_manager():
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True
 )
 
 
@@ -117,6 +121,8 @@ app.include_router(pdf2md_router.router)
 app.include_router(document_chunk_router.router)
 app.include_router(instruction_datum_router.router)
 app.include_router(chunk_router.router)
+app.include_router(instruction_gen_router.router)
+app.include_router(qdrant_router.router)
 
 
 @app.get("/")

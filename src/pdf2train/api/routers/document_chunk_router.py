@@ -17,14 +17,16 @@ from pdf2train.api.schema.document_chunk_schema import *
 
 # Manager
 from pdf2train.core.manager.document_chunk_manager import DocumentChunkManager
+from pdf2train.core.manager.instruction_datum_manager import InstructionDatumManager
 from pdf2train.utils.response import make_response
 from pdf2train.core.schema.document_chunk_dto import DocumentChunkFilterDTO, DocumentChunkCoreDTO, DocumentChunkUpdateDTO
-from pdf2train.api.schema.document_chunk_schema import ChunkItemRes
+from pdf2train.api.schema.document_chunk_schema import ChunkItemRes, ChunkDeleteCheckReq, ChunkClearCheckReq
 from pdf2train.core.schema.base_schema import PageResult
 from pdf2train.api.dependencies import get_document_chunk_manager
-
+from pdf2train.api.dependencies import get_instruction_datum_manager
 
 router = APIRouter(prefix="/api/document_chunk", tags=["Document Chunk"])
+from pdf2train.utils.export_utils import list_to_jsonl_stream
 
 
 @router.post("/list")
@@ -57,12 +59,97 @@ async def update_chunk(
 @router.post("/delete")
 async def delete_chunk(
     req: ChunkDeleteReq,
-    manager: DocumentChunkManager = Depends(get_document_chunk_manager)
+    manager: DocumentChunkManager = Depends(get_document_chunk_manager),
+    instruction_datum_manager: InstructionDatumManager = Depends(get_instruction_datum_manager)
 ):
-    success = await manager.delete_chunk(req.id)
-    if success:
-        return make_response(True, "删除成功！")
-    return make_response(False, "删除失败！", code=500)
+    try:
+        # 1. 删除chunk
+        await manager.delete_chunk(req.id)
+        # 2. 删除参考该chunk的指令数据集
+        if req.cascade_ids:
+            count = await instruction_datum_manager.delete_instructions_batch(req.cascade_ids)
+        return make_response(True, f"删除成功！")
+    except Exception as e:
+        return make_response(success=False, message=str(e), code=500)
+    
+@router.post("/delete_by_id")
+async def delete_by_id(
+    req: ChunkClearReq,
+    manager: DocumentChunkManager = Depends(get_document_chunk_manager),
+    instruction_datum_manager: InstructionDatumManager = Depends(get_instruction_datum_manager)
+):
+    try:
+        # 1. 根据doc_id删除全部chunk
+        count = await manager.delete_chunks_by_doc_id(req.doc_id)
+        
+        # 2. 删除cascade_ids
+        if req.cascade_ids:
+            count = await instruction_datum_manager.delete_instructions_batch(req.cascade_ids)
+        return make_response(True, f"删除成功！{str(count)}")
+    except Exception as e:
+        return make_response(False, str(e), code=500)
+
+@router.post("/delete/check_chunk")
+async def check_chunk_delete(
+    req: ChunkDeleteCheckReq,
+    instruction_datum_manager: InstructionDatumManager = Depends(get_instruction_datum_manager)
+):
+    try:
+        # 1. 查关联 ID
+        affected_ids = await instruction_datum_manager.check_cascade_impact([req.id])
+        
+        # 2. 无影响
+        if not affected_ids:
+            return make_response(
+                success=True, 
+                message="无级联影响", 
+                data={
+                    "need_confirm": False,
+                    "warning_message": "此操作将永久删除该语义块数据，此操作不可撤销。确定要继续吗？",
+                    "cascade_ids": []
+                }
+            )
+
+        # 3. 有影响
+        count = len(affected_ids)
+        msg = f"检测到该切片关联了 {count} 条指令数据。继续操作将同时删除这些指令数据！"
+
+        return make_response(
+            success=True, 
+            message="需确认", 
+            data={
+                "need_confirm": True,
+                "warning_message": msg,
+                "cascade_ids": affected_ids
+            }
+        )
+    except Exception as e:
+        return make_response(success=False, message=str(e), code=500)
+
+@router.post("/delete/check_doc_id")
+async def check_chunk_delete(
+    req: ChunkClearCheckReq,
+    instruction_datum_manager: InstructionDatumManager = Depends(get_instruction_datum_manager)
+):
+    # 1. 查关联 ID
+    affected_ids = await instruction_datum_manager.check_cascade_impact_by_doc_id(req.doc_id)
+    
+    if not affected_ids:
+        return make_response(True, "无级联影响", {
+            "need_confirm": False,
+            "warning_message": "此操作将永久删除该文档下的所有语义块数据，此操作不可撤销。确定要继续吗？",
+            "cascade_ids": []
+        })
+
+    # 2. 有影响
+    count = len(affected_ids)
+    msg = f"检测到文档编号 {req.doc_id} 关联了 {count} 条指令数据。继续操作将同时删除这些指令数据！"
+
+    return make_response(True, "需确认", {
+        "need_confirm": True,
+        "warning_message": msg,
+        "cascade_ids": affected_ids
+    })
 
 @router.get("/download/{doc_id}")
 async def download_json(
@@ -70,13 +157,9 @@ async def download_json(
     manager: DocumentChunkManager = Depends(get_document_chunk_manager)
 ):
     data_list = await manager.export_chunks_json(doc_id)
-    
-    json_str = json.dumps(data_list, ensure_ascii=False, indent=2)
-    stream = BytesIO(json_str.encode("utf-8"))
-    
+    stream = list_to_jsonl_stream(data_list)
     filename = f"doc_{doc_id}_chunks.json"
     encoded_filename = urllib.parse.quote(filename)
-    
     return StreamingResponse(
         stream, 
         media_type="application/json",
@@ -88,8 +171,11 @@ async def preview_json(
     doc_id: int,
     manager: DocumentChunkManager = Depends(get_document_chunk_manager)
 ):
-    data = await manager.export_chunks_json(doc_id)
-    return make_response(True, "成功！", data)
+    try:
+        data = await manager.export_chunks_json(doc_id)
+        return make_response(True, "成功！", data)
+    except Exception as e:
+        return make_response(success=False, message="导出失败！{str(e)}", code=500)
 
 @router.post("/download/stream-pretrain")
 async def download_pretrain(

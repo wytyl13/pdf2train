@@ -16,8 +16,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 import unicodedata
 import logging
+import asyncio
 
-from pdf2train.api.service.base.llm_config_service import LLMConfigService
+from pdf2train.core.table.llm_config import LLMConfig
+
 
 class InstructionLLMGenerator:
     """
@@ -246,7 +248,6 @@ class InstructionLLMGenerator:
     """
 
     def __init__(self, 
-                 llm_config_service: LLMConfigService,
                  max_workers: int = 5,
                  log_file: str = "gen_progress.log",
     ):
@@ -255,7 +256,6 @@ class InstructionLLMGenerator:
         """
         self.max_workers = max_workers
         self.log_file = log_file
-        self.llm_config_service = llm_config_service
         self.logger = logging.getLogger(self.__class__.__name__)
         # 仍然保留进度记录，避免重复请求扣费
 
@@ -301,36 +301,27 @@ class InstructionLLMGenerator:
         print(f"🔍 [Difflib 拒绝] 匹配度: {ratio:.2f} | Quote: {quote[:10]}...")
         return False
 
-    async def _create_llm_context(self, doc_id: int, field_llm_name: str) -> Dict[str, Any]:
+    def _create_llm_context(self, llm_config: LLMConfig) -> Dict[str, Any]:
         """
         【无状态工厂方法】
         根据 doc_id 创建并返回专属的 OpenAI Client 和 Model Name。
         不再修改 self.client，解决并发冲突问题。
         """
-        if not doc_id:
-            raise ValueError("Doc ID is required to create LLM context")
-            
         try:
-            # 获取配置
-            config = await self.llm_config_service.get_config_by_doc_id(
-                doc_id=doc_id, 
-                field_llm_name=field_llm_name
-            )
-            
-            if not config:
+            if not llm_config:
                 # 如果没找到配置，抛出异常或者返回默认
                 raise ValueError(f"LLM Config not found for doc_id: {doc_id}")
 
             # 创建全新的 Client 实例
             new_client = OpenAI(
-                api_key=config.get("api_key"),
-                base_url=config.get("base_url")
+                api_key=llm_config.api_key,
+                base_url=llm_config.base_url
             )
             
             # 返回上下文包
             return {
                 "client": new_client,
-                "model_name": config.get("model_name")
+                "model_name": llm_config.model_name
             }
             
         except Exception as e:
@@ -633,7 +624,11 @@ class InstructionLLMGenerator:
             
         return [] # 失败返回空列表
 
-    async def process_single_h1(self, doc_id: int, h1_data: Dict) -> List[Dict]:
+    def process_single_h1(
+        self, 
+        h1_data: Dict,
+        llm_config: LLMConfig
+    ) -> List[Dict]:
         """
         【改动点】：处理单个 H1，返回该章节生成的所有数据列表
         """
@@ -642,7 +637,7 @@ class InstructionLLMGenerator:
         xml_context = h1_data['prompt_text']
         id_mapping = h1_data['id_mapping']
         
-        llm_context = await self._create_llm_context(doc_id=doc_id, field_llm_name="instruction_gen_llm_config")
+        llm_context = self._create_llm_context(llm_config)
         print(f"🚀 [Processing] {h1_title}")
         
         # 构建共享的 System Content (包含 XML)
@@ -708,7 +703,7 @@ class InstructionLLMGenerator:
             if negative_sample_quota > 0 and complexity == "hard" and random.random() > 0.5:
                 tasks_to_run.append((topic_str, "无法回答"))
                 negative_sample_quota -= 1
-        
+            break
         # 3 收集本章节所有生成的数据
         chapter_results = []
         
@@ -738,7 +733,6 @@ class InstructionLLMGenerator:
         # === Phase 2: 并发 (Parallel Execution) ===
         if remaining_tasks:
             print(f"⚡ [并发中] 缓存已建立，正在加速执行剩余 {len(remaining_tasks)} 个任务...")
-            
             active_workers = min(self.max_workers, len(remaining_tasks))
             
             with ThreadPoolExecutor(max_workers=active_workers) as executor:
@@ -746,8 +740,8 @@ class InstructionLLMGenerator:
                 for t_topic, t_perspective in remaining_tasks:
                     futures.append(
                         executor.submit(
-                            self._worker_task, 
-                            t_topic, t_perspective, 
+                            self._worker_task,
+                            t_topic, t_perspective,
                             xml_context, id_mapping, llm_context, shared_system_content
                         )
                     )

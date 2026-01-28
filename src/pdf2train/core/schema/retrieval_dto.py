@@ -38,3 +38,10 @@ class RetrievalSettings(BaseModel):
         if self.mode == RetrievalMode.HYBRID and self.hybrid_params is None:
             self.hybrid_params = HybridConfig(alpha=0.5)
         return self
+    
+class VectorSearchDTO(BaseModel):
+    """检索业务参数"""
+    query: str
+    kb_id: Optional[int] = None
+    top_k: int = 5
+    return_raw: bool = False

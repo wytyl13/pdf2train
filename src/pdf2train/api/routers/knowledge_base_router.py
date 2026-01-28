@@ -24,6 +24,7 @@ from pdf2train.api.schema.knowledge_base_schema import (
 # 2. 引入 Core DTO (业务契约)
 from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO
 from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO
+from pdf2train.core.schema.base_schema import PageResult
 
 # 3. 引入 Manager 和 Dependencies
 from pdf2train.core.manager.knowledge_base_manager import KnowledgeBaseManager
@@ -103,14 +104,14 @@ async def get_kb_list(
 ):
     """分页查询知识库列表"""
     try:
-        result = await manager.get_kb_list(
+        result: PageResult[KnowledgeBaseCoreDTO] = await manager.get_kb_list(
             page=req.page, 
             page_size=req.page_size, 
             keyword=req.keyword
         )
-        return make_response(True, "查询成功", result)
+        return make_response(True, "知识库查询成功！", result)
     except Exception as e:
-        return make_response(False, f"查询失败: {str(e)}", code=500)
+        return make_response(False, f"{str(e)}", code=500)
 
 
 @router.post("/detail")

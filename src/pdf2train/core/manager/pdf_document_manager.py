@@ -516,7 +516,14 @@ class PdfDocumentManager:
         return "\n".join(lines)
 
     async def get_doc_count_by_kb_id(self, kb_id: int) -> int:
-        return await self.pdf_service.get_doc_count_by_kb_id(kb_id)
+        """
+        获取知识库文档统计信息
+        返回格式: {"total": 100, "embedded": 80}
+        """
+        try:
+            return await self.pdf_service.get_doc_count_by_kb_id(kb_id)
+        except Exception as e:
+            raise ValueError(f"获取知识库文档统计信息失败！{str(e)}") from e
 
     async def get_statistics(self):
         """
@@ -566,12 +573,15 @@ class PdfDocumentManager:
         """
         获取未分配知识库的文档 (kb_id IS NULL)
         """
-        items, total = await self.pdf_service.search_paginated(
-            page, size, 
-            # 构造一个特殊的 filter
-            PdfDocFilterDTO(kb_id=None, keyword=keyword) # 假设 None 代表查询 null
-        )
-        return {"items": items, "total": total}
+        try:
+            db_result: Dict[str, List[PdfDocument] | int] = await self.pdf_service.search_paginated(
+                page, size, 
+                # 构造一个特殊的 filter
+                PdfDocFilterDTO(kb_id=None, keyword=keyword) # 假设 None 代表查询 null
+            )
+            return PageResult[PdfDocCoreDTO](**db_result)
+        except Exception as e:
+            raise ValueError(f"获取未分配知识库文档失败！{str(r)}") from e
 
     async def get_markdown_content(self, doc_id: int) -> str:
         """

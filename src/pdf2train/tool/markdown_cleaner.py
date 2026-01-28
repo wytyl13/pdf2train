@@ -15,10 +15,6 @@ from openai import OpenAI, AsyncOpenAI
 import pandas as pd
 from io import StringIO
 
-
-from pdf2train.api.service.base.llm_config_service import LLMConfigService
-
-
 # ================= 1. 完整的高智商 Prompts (未删减版) =================
 
 PROMPTS = {

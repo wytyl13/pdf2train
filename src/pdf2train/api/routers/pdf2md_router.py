@@ -9,18 +9,13 @@ from pathlib import Path
 from dotenv import load_dotenv, dotenv_values
 
 # dependencies.py
-from pdf2train.api.service.base.pdf_document_service import PdfDocumentService
-from pdf2train.api.service.base.pipeline_task_service import PipelineTaskService
-from pdf2train.api.service.base.minio_service import MinioService
-from pdf2train.api.service.base.pdf2md_service import Pdf2MdService
 from pdf2train.core.manager.pdf2md_manager import Pdf2MdManager
-from pdf2train.api.service.base.llm_config_service import LLMConfigService
 # 假设 Config 已经实例化
 from pdf2train.core.config import core_config 
 
 
 
-from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Depends, BackgroundTasks
 from pdf2train.api.schema.pdf2md_schema import Pdf2MdConvertReq
 from pdf2train.core.manager.pdf2md_manager import Pdf2MdManager
 from pdf2train.api.dependencies import get_pdf2md_manager 

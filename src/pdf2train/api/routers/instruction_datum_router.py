@@ -31,6 +31,8 @@ from pdf2train.api.schema.instruction_datum_schema import (
     InstructionDatumItemRes
 )
 
+from pdf2train.utils.export_utils import list_to_jsonl_stream
+
 # 引入统一响应封装 (假设项目中有这个工具)
 from pdf2train.utils.response import make_response
 
@@ -125,12 +127,9 @@ async def download_jsonl(
     GET 下载单个文档 JSONL
     对应原 Server: download_jsonl
     """
-    jsonl_str = await manager.export_finetuning_jsonl(doc_id=doc_id)
+    data_list = await manager.export_for_finetuning(doc_id=doc_id)
     
-    if not jsonl_str:
-        return make_response(False, "暂无有效数据", code=404)
-
-    stream = BytesIO(jsonl_str.encode("utf-8"))
+    stream = list_to_jsonl_stream(data_list)
     filename = f"finetune_doc_{doc_id}.jsonl"
     encoded_filename = urllib.parse.quote(filename)
     
@@ -148,15 +147,10 @@ async def download_jsonl_all(
     GET 下载所有 JSONL
     对应原 Server: download_jsonl_all
     """
-    jsonl_str = await manager.export_finetuning_jsonl(doc_id=None, kb_id=None)
-    
-    if not jsonl_str:
-        return make_response(False, "暂无有效数据", code=404)
-        
-    stream = BytesIO(jsonl_str.encode("utf-8"))
+    data_list = await manager.export_for_finetuning(doc_id=None, kb_id=None)
+    stream = list_to_jsonl_stream(data_list)
     filename = f"finetune_all_{datetime.now().strftime('%Y%m%d')}.jsonl"
     encoded_filename = urllib.parse.quote(filename)
-    
     return StreamingResponse(
         stream, 
         media_type="application/jsonl",
@@ -174,12 +168,9 @@ async def download_jsonl_by_kb(
     """
     kb_ids = [req.kb_id] if isinstance(req.kb_id, int) else req.kb_id
     
-    jsonl_str = await manager.export_finetuning_jsonl(doc_id=None, kb_id=kb_ids)
+    data_list = await manager.export_for_finetuning(doc_id=None, kb_id=kb_ids)
     
-    if not jsonl_str:
-         return make_response(False, "该知识库下暂无有效的微调数据", code=404)
-         
-    stream = BytesIO(jsonl_str.encode("utf-8"))
+    stream = list_to_jsonl_stream(data_list)
     
     kb_suffix = f"kb_{kb_ids[0]}" if len(kb_ids) == 1 else "multi_kb"
     filename = f"finetune_{kb_suffix}_{datetime.now().strftime('%Y%m%d')}.jsonl"

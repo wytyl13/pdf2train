@@ -31,6 +31,20 @@ class ChunkUpdateReq(BaseModel):
 class ChunkDeleteReq(BaseModel):
     """Delete single chunk"""
     id: str = Field(..., description="Chunk UUID")
+    cascade_ids: Optional[List[str]] = Field(default=None, description="InstructionDatum UUIDs")
+
+class ChunkDeleteCheckReq(BaseModel):
+    """Delete single chunk"""
+    id: str = Field(..., description="Chunk UUID")
+
+class ChunkClearReq(BaseModel):
+    """Delete single chunk"""
+    doc_id: int = Field(..., description="document_id")
+    cascade_ids: Optional[List[str]] = Field(default=None, description="InstructionDatum UUIDs")
+
+class ChunkClearCheckReq(BaseModel):
+    """Delete single chunk"""
+    doc_id: int = Field(..., description="document_id")
 
 
 class ChunkDeleteByDocReq(BaseModel):

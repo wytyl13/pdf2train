@@ -13,6 +13,7 @@ from sqlalchemy import select, update, or_
 from pdf2train.core.table.llm_config import LLMConfig
 from pdf2train.core.table.llm_enum import ModelType
 from pdf2train.core.table.pdf_document import PdfDocument
+from pdf2train.core.schema.qdrant_dto import EmbeddingConfigOverride
 
 from pdf2train.core.configs.sql_config import SqlConfig
 from pdf2train.core.provider.sql_provider import SqlProvider
@@ -52,39 +53,41 @@ class LLMConfigService:
         results = await self.sql_provider.get_record_by_condition({"id": config_id})
         return results[0] if results else None
 
+    async def get_embedding_config_override(self, doc_id: int) -> EmbeddingConfigOverride:
+        db_config: LLMConfig = await self.get_config_by_doc_id(doc_id, "embedding_llm_config")
+        return EmbeddingConfigOverride(
+            base_url=db_config.base_url,
+            api_key=db_config.api_key,
+            model_name=db_config.model_name
+        )
+
     async def get_config_by_doc_id(self, doc_id: int, field_llm_name: str) -> Optional[LLMConfig]:
-        try:
-            doc_provider = SqlProvider(
-                model=PdfDocument, 
-                sql_config=self.sql_config 
-            )
-            # 2. 查询文档记录
-            docs = await doc_provider.get_record_by_condition({"id": doc_id})
-            if not docs:
-                self.logger.warning(f"未找到 ID 为 {doc_id} 的文档")
-                return None
-            doc = docs[0]
+        async with self.sql_provider.get_db_session() as session:
+            target_column = getattr(PdfDocument, field_llm_name)
+            stmt = select(target_column).where(PdfDocument.id == doc_id)
+            result = await session.execute(stmt)
+            config_name = result.scalar()
+        # 2. 如果文档中该字段为空 (None 或 "")，直接返回 None
+        if not config_name: raise ValueError(f"{field_llm_name}字段为空！")
+        # 3. 复用现有的方法，根据名称查找完整的配置
+        return await self.find_by_name_or_model(config_name)
 
-            # 3. 动态获取字段值 (该值应为 LLMConfig 的 name，例如 "gpt-4-dev")
-            # 检查字段是否存在于模型中
-            if not hasattr(doc, field_llm_name):
-                self.logger.error(f"PdfDocument 模型中不存在字段: {field_llm_name}")
-                return None
-            
-            # 获取字段的值
-            config_name = getattr(doc, field_llm_name)
-            # 4. 如果文档中该字段为空 (None 或 "")，直接返回 None
-            if not config_name:
-                return None
+    async def get_collection_name_by_doc_id(self, doc_id: int) -> Optional[str]:
+        """
+        [DB] 根据文档ID获取对应的 Qdrant Collection Name
+        
+        原理: 
+        Qdrant 的 Collection Name 通常等于 Embedding 模型的真实 model_name。
+        文档表中存储的可能是配置别名 (name) 或 真实名 (model_name)。
+        该方法负责将文档记录中的标识符解析为真实的 model_name。
+        """
+        # 1. 使用 Session 查询文档的 embedding_model 字段
+        async with self.sql_provider.get_db_session() as session:
+            stmt = select(PdfDocument.embedding_model).where(PdfDocument.id == doc_id)
+            result = await session.execute(stmt)
+            identifier = result.scalar()
 
-            # 5. 复用现有的方法，根据名称查找完整的配置
-            return await self.find_by_name_or_model(config_name)
-        except Exception as e:
-            # 捕获所有未预期的异常 (如数据库连接断开、SQL错误等)
-            import traceback
-            self.logger.error(f"根据文档获取LLM配置发生异常 (doc_id={doc_id}, field={field_llm_name}): {e}")
-            self.logger.error(traceback.format_exc())
-            return None
+        return await self.get_real_model_name(identifier)
 
     async def search_paginated(self, page: int, page_size: int, condition: Dict[str, Any]):
         """[DB] 分页查询，默认将 is_default=True 的排在前面"""

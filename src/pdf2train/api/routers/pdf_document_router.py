@@ -120,8 +120,11 @@ async def get_unassigned_docs(
 ):
     """获取未分配知识库的文档"""
     # 提供的 Schema 中缺失 PdfDocUnassignedReq，这里直接用 Query 参数
-    result = await manager.get_unassigned_documents(req.page, req.page_size, req.keyword)
-    return make_response(True, "查询成功", result)
+    try:
+        result = await manager.get_unassigned_documents(req.page, req.page_size, req.keyword)
+        return make_response(True, "查询成功", result)
+    except Exception as e:
+        return make_response(success=False, message=str(e), code=500)
 
 @router.get("/content", response_model=dict)
 async def get_content(
@@ -148,7 +151,7 @@ async def save_content(
         return make_response(True, "保存成功")
     except Exception as e:
         return make_response(False, str(e), code=500)
-    
+   
 @router.post("/export_books_jsonl")
 async def export_books(
     req: PdfDocExportBooksReq,
@@ -180,16 +183,22 @@ async def get_doc_count(
     manager: PdfDocumentManager = Depends(get_pdf_manager)
 ):
     """按知识库统计文档数"""
-    count = await manager.get_doc_count_by_kb_id(req.kb_id)
-    return make_response(True, "查询成功", {"count": count})
+    try:
+        count = await manager.get_doc_count_by_kb_id(req.kb_id)
+        return make_response(True, "查询成功", count)
+    except Exception as e:
+        return make_response(success=False, message=str(e), code=500)
 
 @router.get("/statistics", response_model=dict)
 async def get_statistics(
     manager: PdfDocumentManager = Depends(get_pdf_manager)
 ):
     """获取统计概览"""
-    stats = await manager.get_statistics()
-    return make_response(True, "查询成功", stats)
+    try:
+        stats = await manager.get_statistics()
+        return make_response(True, "查询成功", stats)
+    except Exception as e:
+        return make_response(success=False, message=str(e), code=500)
 
 @router.get("/chunk_count", response_model=dict)
 async def get_chunk_count(

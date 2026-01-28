@@ -17,7 +17,7 @@ from sqlalchemy import select, func, and_, or_, text, update
 from pdf2train.core.configs.sql_config import SqlConfig
 from pdf2train.core.provider.sql_provider import SqlProvider
 from pdf2train.core.table.pdf_document import PdfDocument
-from pdf2train.core.table.pipeline_task import PipelineTask, ChunkTaskResult
+from pdf2train.core.table.pipeline_task import PipelineTask, ChunkTaskResult, TaskLifecycle, TaskType
 from pdf2train.core.table.knowledge_base import KnowledgeBase
 
 from pdf2train.core.schema.pdf_document_dto import PdfDocCoreDTO, PdfDocUpdateDTO, PdfDocFilterDTO
@@ -147,22 +147,17 @@ class PdfDocumentService:
         )
 
     async def update_kb_by_ids(self, ids: List[int], new_kb_id: Optional[Union[int, None]] = None):
-        try:
-            result = None
-            stmt = (
-                update(self.model)
-                .where(self.model.id.in_(ids))
-                .values(
-                    kb_id=new_kb_id,
-                    update_time=datetime.now()
-                )
+        stmt = (
+            update(self.model)
+            .where(self.model.id.in_(ids))
+            .values(
+                kb_id=new_kb_id,
+                update_time=datetime.now()
             )
-            async with self.sql_provider.get_db_session() as session:
-                result = await session.execute(stmt)
-        except Exception as e:
-            self.logger.error("更新失败！")
-            raise
-        return result
+        )
+        async with self.sql_provider.get_db_session() as session:
+            await session.execute(stmt)
+        return len(ids)
     
     async def get_stats_group_by_status(self) -> Dict[int, int]:
         """获取文档状态分布"""
@@ -201,21 +196,47 @@ class PdfDocumentService:
         
     async def get_doc_count_by_kb_id(self, kb_id: int) -> int:
         """
-        根据知识库ID统计文档数量
+        获取知识库文档统计信息
+        返回格式: {"total": 100, "embedded": 80}
         """
-        try:
-            async with self.sql_provider.get_db_session() as session:
-                # 构建查询语句: SELECT count(id) FROM pdf_document WHERE kb_id = :kb_id
-                stmt = select(func.count(PdfDocument.id)).where(PdfDocument.kb_id == kb_id)
-                
-                # 执行查询
-                result = await session.execute(stmt)
-                
-                # 获取结果 scalar() 返回第一行第一列的值，即 count 数值
-                return result.scalar() or 0
-        except Exception as e:
-            raise e
-        
+        async with self.sql_provider.get_db_session() as session:
+            # 1. 查询该知识库下的文档总数
+            stmt_total = (
+                select(func.count(PdfDocument.id))
+                .where(PdfDocument.kb_id == kb_id)
+            )
+            
+            # === 2. 查询已完成向量化的数量
+            stmt_embedded = (
+                select(func.count(PdfDocument.id))
+                .join(PipelineTask, PdfDocument.id == PipelineTask.doc_id)
+                .where(PdfDocument.kb_id == kb_id)
+                .where(PipelineTask.task_type == TaskType.QDRANT_INDEX)
+                .where(PipelineTask.status == TaskLifecycle.SUCCESS)
+            )
+
+            # 并发执行查询
+            total_result = await session.execute(stmt_total)
+            embedded_result = await session.execute(stmt_embedded)
+            
+            total_count = total_result.scalar() or 0
+            embedded_count = embedded_result.scalar() or 0
+            progress = round(embedded_count / total_count, 2) if total_count > 0 else 0.0
+            return {
+                "total": total_count,
+                "vectorized": embedded_count,
+                "progress": progress
+            }
+
+    async def get_kb_id_by_doc_id(self, doc_id: int) -> Optional[int]:
+        """
+        获取文档所属知识库 ID
+        返回: int (kb_id) 或 None (如果不存在或未绑定)
+        """
+        kb_docs: PdfDocument = await self.sql_provider.get_record_by_condition(condition={"id": doc_id})
+        if not kb_docs: raise ValueError(f"该文档不存在！{str(doc_id)}")
+        return kb_docs[0].kb_id
+
     async def get_doc_ids_by_kb_ids(self, kb_ids: List[int]) -> List[int]:
         """
         根据知识库ID列表，批量获取对应的文档ID列表

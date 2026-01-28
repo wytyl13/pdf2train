@@ -8,8 +8,9 @@
 import httpx
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 import logging
+from typing import List, Dict
 
-from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO
+from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO, IngestRequest
 
 
 WANGENG_VECTOR_URL = "http://wangeng:9040/api/vector/ingest"
@@ -20,6 +21,35 @@ WANGENG_QDRANT_UPDATE_METADATA_URL = "http://wangeng:9040/api/vector/update_meta
 class QdrantService:
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
+    
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_fixed(2),
+        retry=retry_if_exception_type(httpx.HTTPError) # 只重试网络错误
+    )
+    async def ingest_api(
+        self, 
+        ingest_request: IngestRequest
+    ) -> int:
+        """
+        [独立抽取的 API 调用方法] 负责发送请求，包含重试逻辑
+        供documents_chunk和instruction datum数据表单个chunk修改的时候同步向量库更新
+        """
+        payload_chunks: List[Dict] = ingest_request.chunks
+        timeout_settings = httpx.Timeout(60.0, connect=10.0) # 设置合理的超时
+        async with httpx.AsyncClient(timeout=timeout_settings) as client:
+            response = await client.post(
+                WANGENG_VECTOR_URL,
+                json=ingest_request.model_dump(),
+            )
+            response.raise_for_status()
+            
+            resp_data = response.json()
+            is_success = resp_data.get("success") or (resp_data.get("status") == "success")
+            if not is_success:
+                raise Exception(f"API 业务错误: {resp_data}")
+        return len(payload_chunks)
+    
     
     @retry(
         stop=stop_after_attempt(3), 

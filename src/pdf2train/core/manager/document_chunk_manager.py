@@ -19,6 +19,9 @@ from pdf2train.core.schema.document_chunk_dto import (
     DocumentChunkUpdateDTO,
 )
 
+from pdf2train.core.table.pipeline_task import PipelineTask, TaskLifecycle, TaskType, ChunkStatus
+from pdf2train.core.schema.pipeline_task_dto import PipelineTaskUpdateDTO
+
 class DocumentChunkManager:
     def __init__(
         self, 
@@ -89,61 +92,92 @@ class DocumentChunkManager:
     
     async def delete_chunk(self, chunk_id: str) -> bool:
         """
+        删除指定chunk
         Business Logic: Get Doc ID -> Delete SQL -> Delete Vector -> Update Task Stats
         """
-        # 1. Get Doc ID (Need for Vector delete and Task update)
-        chunk: DocumentChunk = await self.service.get_by_id(chunk_id)
-        if not chunk:
-            return False
-        
-        doc_id = chunk.document_id
-        
-        # 2. Delete from SQL
-        success = await self.service.delete(chunk_id)
-        if not success:
-            return False
+        try:
+            # 1. Get Doc ID (Need for Vector delete and Task update)
+            chunk_db_data: DocumentChunk = await self.service.get_by_id(chunk_id)
+            if not chunk_db_data: raise ValueError(f"[DocumentChunk]没有查询到要删除的chunk！{chunk_id}")
+            
+            # 2. Delete from SQL
+            success = await self.service.delete(chunk_id)
+            if not success: raise ValueError(f"[DocumentChunk]删除失败！{chunk_id}")
 
-        # 3. Delete from Vector DB (Cross-Service Call)
-        # collection_name = await self.vector_service.get_collection_name_by_doc_id(doc_id)
-        # if collection_name:
-        #     await self.vector_service.delete_vector(
-        #         VectorDeleteRequest(
-        #             collection_name=collection_name,
-        #             filters={"chunk_id": chunk_id}
-        #         )
-        #     )
+            # 3. Delete from Vector DB (Cross-Service Call)
+            # collection_name = await self.vector_service.get_collection_name_by_doc_id(chunk_db_data.document_id)
+            # if collection_name:
+            #     await self.vector_service.delete_vector(
+            #         VectorDeleteRequest(
+            #             collection_name=collection_name,
+            #             filters={"chunk_id": chunk_id}
+            #         )
+            #     )
 
-        # 4. Update Task Stats (Cross-Service Call)
-        # await self._decrease_task_count(doc_id)
-        return True
+            # 4. 不需要 Update Task Stats
+            # await self._decrease_task_count(doc_id)
+            
+            # 5. 判断是否是最后一个删除，如果是更新对应的task状态为pending
+            counts_map: Dict[int, int] = await self.service.get_counts_by_doc_ids([chunk_db_data.document_id])
+            if not counts_map.get(chunk_db_data.document_id):
+                task_db_data: PipelineTask = await self.pipeline_task_service.get_specific_task_by_doc_id(chunk_db_data.document_id, TaskType.MARKDOWN_CHUNK.value)
+                task_update_status: bool = await self.pipeline_task_service.update_and_refresh_parent_doc_status(
+                    task_db_data.id,
+                    PipelineTaskUpdateDTO(
+                        status=TaskLifecycle.PENDING.value,
+                        detailed_status=ChunkStatus.PENDING.value,
+                        result_data=None
+                    )
+                )
+                if not task_update_status:
+                    raise ValueError(f"[PipelineTask]更新状态失败-{task_db_data.id}-")
+            return success
+        except Exception as e:
+            raise ValueError(f"删除指定chunk失败！{str(e)}") from e
     
     async def delete_chunks_by_doc_id(self, doc_id: int) -> int:
         """
-        Business Logic: Delete All SQL -> Delete All Vector -> Reset Task
+        清空指定知识块
         """
-        # 1. Delete SQL
-        count = await self.service.delete_by_doc_id(doc_id)
-        
-        # 2. Delete Vector
-        # collection_name = await self.vector_service.get_collection_name_by_doc_id(doc_id)
-        # if collection_name:
-        #      await self.vector_service.delete_vector(
-        #         VectorDeleteRequest(
-        #             collection_name=collection_name,
-        #             filters={"doc_kb_id": doc_id, "type": "document_chunk"}
-        #         )
-        #     )
-             
-        # 3. Reset Task Logic
-        # (Simplified for brevity, similar to _decrease_task_count but setting to 0)
-        
-        return count
+        try:
+            # 1. Delete SQL
+            count = await self.service.delete_by_doc_id(doc_id)
+            
+            # 2. Delete Vector
+            # collection_name = await self.vector_service.get_collection_name_by_doc_id(doc_id)
+            # if collection_name:
+            #      await self.vector_service.delete_vector(
+            #         VectorDeleteRequest(
+            #             collection_name=collection_name,
+            #             filters={"doc_kb_id": doc_id, "type": "document_chunk"}
+            #         )
+            #     )
+                
+            # 3. Reset Task Logic
+            # (Simplified for brevity, similar to _decrease_task_count but setting to 0)
+            
+            # 5. 判断是否是最后一个删除，如果是更新对应的task状态为pending
+            task_db_data: PipelineTask = await self.pipeline_task_service.get_specific_task_by_doc_id(doc_id, TaskType.MARKDOWN_CHUNK.value)
+            task_update_status: bool = await self.pipeline_task_service.update_and_refresh_parent_doc_status(
+                task_db_data.id,
+                PipelineTaskUpdateDTO(
+                    status=TaskLifecycle.PENDING.value,
+                    detailed_status=ChunkStatus.PENDING.value,
+                    result_data=None
+                )
+            )
+            if not task_update_status:
+                raise ValueError(f"[PipelineTask]更新状态失败-{task_db_data.id}-")
+            return count
+        except Exception as e:
+            raise ValueError(f"清空指定知识块失败！{str(e)}") from e
     
     async def export_chunks_json(self, doc_id: int) -> List[Dict[str, Any]]:
-        """Business Logic: Get DB Models -> Convert to plain Dict for JSON export"""
-        chunks = await self.service.get_all_by_doc_id(doc_id)
-        # Using Pydantic Schema to dump to dict
-        return [DocumentChunkCoreDTO.model_validate(c).model_dump() for c in chunks]
+        """导出json数据"""
+        try:
+            return await self.service.export_chunks_json(doc_id)
+        except Exception as e:
+            raise ValueError(f"导出json数据失败！{str(e)}") from e
     
     async def download_pretrain_stream(self, doc_ids: List[int]) -> AsyncGenerator[str, None]:
         """Pass-through stream"""

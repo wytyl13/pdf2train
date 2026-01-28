@@ -6,13 +6,16 @@
 @File    : knowledge_base_dto.py
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, Dict, Any
 
 from pdf2train.core.schema.retrieval_dto import RetrievalSettings
 
 class KnowledgeBaseCoreDTO(BaseModel):
     """创建知识库 DTO (数据库字段)"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
     name: str
     description: Optional[str] = None
     avatar_url: Optional[str] = None
@@ -30,6 +33,7 @@ class KnowledgeBaseUpdateDTO(BaseModel):
     a_settings: Optional[RetrievalSettings] = None
     is_public: Optional[bool] = None
     
+
     
 
     

@@ -19,6 +19,7 @@ from pdf2train.core.table.pipeline_task import PipelineTask, TaskType, TaskLifec
 from pdf2train.core.table.pdf_document import PdfDocument, DocStatus
 from pdf2train.core.configs.sql_config import SqlConfig
 from pdf2train.core.schema.pipeline_task_dto import PipelineTaskCoreDTO, PipelineTaskUpdateDTO
+from pdf2train.core.schema.pdf_document_dto import PdfDocUpdateDTO
 
 class PipelineTaskService:
     """任务流水线业务服务"""
@@ -29,9 +30,10 @@ class PipelineTaskService:
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.model = PipelineTask
+        self.sql_config = sql_config
         self.sql_provider = SqlProvider(
-            model=PipelineTask, 
-            sql_config=sql_config 
+            model=self.model, 
+            sql_config=self.sql_config 
         )
     
     async def init_tasks_for_document(self, doc_id: int) -> bool:
@@ -173,7 +175,113 @@ class PipelineTaskService:
         except Exception as e:
             self.logger.error(f"更新任务失败 TaskID {task_id}: {e}")
             raise e
-        
+    
+    async def update_and_refresh_parent_doc_status(self, task_id: int, update_dto: PipelineTaskUpdateDTO) -> bool:
+        """
+        [业务编排] 更新任务状态
+        1. 计算耗时 (Start/End Time)
+        2. 更新 PipelineTask
+        3. 重新计算并更新 Document 状态
+        """
+        try:
+            # 1. 获取任务上下文
+            task = await self.get_by_id(task_id)
+            if not task:
+                raise ValueError(f"Task ID {task_id} not found")
+
+            doc_id = task.doc_id
+            current_status = task.status
+            db_start_time = task.start_time
+
+            # 2. 业务逻辑: 自动补全时间字段
+            now = datetime.now()
+            target_status = update_dto.status
+
+            # Case: 开始运行
+            if target_status == TaskLifecycle.RUNNING.value and current_status != TaskLifecycle.RUNNING.value:
+                update_dto.start_time = now
+            
+            # Case: 结束 (成功/失败)
+            if target_status in [TaskLifecycle.SUCCESS.value, TaskLifecycle.FAILED.value]:
+                update_dto.end_time = now
+                # 计算耗时
+                if db_start_time:
+                    if isinstance(db_start_time, str):
+                        try:
+                            db_start_time = datetime.fromisoformat(str(db_start_time))
+                        except ValueError:
+                            db_start_time = now
+                    
+                    cost = int((now - db_start_time).total_seconds() * 1000)
+                    update_dto.cost_ms = max(0, cost)
+                
+                # 成功则强制进度 100
+                if target_status == TaskLifecycle.SUCCESS.value:
+                    update_dto.progress = 100
+            # 3. 调用 Service 更新任务
+            await self.update(task_id, update_dto)
+
+            # 4. 触发父文档刷新 (Event Trigger)
+            return await self._refresh_parent_doc_status(doc_id)
+        except Exception as e:
+            import traceback
+            raise ValueError(f"Fail to exec update and refresh parent doc status! {str(e)} \n {traceback.format_exc()}") from e
+    
+    async def _refresh_parent_doc_status(self, doc_id: int):
+        """[Internal] 计算父文档的聚合状态"""
+        try:
+            tasks: List[PipelineTask] = await self.get_by_doc_id(doc_id)
+            if not tasks: return
+
+            total_tasks = len(tasks)
+            completed_count = 0
+            total_progress_sum = 0
+            failed_task = None
+            has_running = False
+
+            for t in tasks:
+                s = t.status
+                p = t.progress or 0
+                
+                if s == TaskLifecycle.SUCCESS.value:
+                    completed_count += 1
+                    p = 100
+                elif s == TaskLifecycle.FAILED.value:
+                    if not failed_task: failed_task = t
+                elif s == TaskLifecycle.RUNNING.value:
+                    has_running = True
+                
+                total_progress_sum += p
+
+            # 聚合逻辑
+            avg_progress = int(total_progress_sum / total_tasks) if total_tasks > 0 else 0
+            
+            new_status = DocStatus.RUNNING.value
+            err_msg = None
+
+            if failed_task:
+                new_status = DocStatus.FAILED.value
+                err_msg = f"Step {failed_task.step_order} Failed: {failed_task.error_message}"
+            elif completed_count == total_tasks:
+                new_status = DocStatus.SUCCESS.value
+                avg_progress = 100
+            elif not has_running and completed_count == 0 and not failed_task:
+                new_status = DocStatus.PENDING.value
+            
+            if new_status == DocStatus.RUNNING.value and avg_progress >= 100:
+                avg_progress = 99
+
+            # 调用 Doc Service
+            pdf_document_sql_provider = SqlProvider(
+                model=PdfDocument, 
+                sql_config=self.sql_config
+            )
+            dto = PdfDocUpdateDTO(status=new_status, progress=avg_progress, process_error=err_msg)
+            return await pdf_document_sql_provider.update_record(record_id=doc_id, data=dto.model_dump(exclude_unset=True))
+        except Exception as e:
+            import traceback
+            raise ValueError(f"Fail to exec refresh parent doc status! {str(e)} \n {traceback.format_exc()}") from e
+    
     async def get_by_doc_id(self, doc_id: int) -> List[PipelineTask]:
         """获取文档的所有任务"""
         try:
@@ -208,6 +316,10 @@ class PipelineTaskService:
             ).group_by(PipelineTask.task_type, PipelineTask.status)
             res = await session.execute(stmt)
             return res.all()
+        
+    async def get_specific_task_by_doc_id(self, doc_id: int, task_type_val: int) -> PipelineTask:
+        db_result: List[PipelineTask] = await self.sql_provider.get_record_by_condition({"doc_id": doc_id, "task_type": task_type_val})
+        return db_result[0] if db_result else None
         
     async def get_status_by_doc_ids(self, doc_ids: List[int]) -> List[Dict]:
         """

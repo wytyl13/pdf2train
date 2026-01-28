@@ -13,11 +13,15 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from pdf2train.core.table.instruction_datum import InstructionDatum
 from pdf2train.core.table.document_chunk import DocumentChunk
-from pdf2train.core.table.pdf_document import PdfDocument
+from pdf2train.core.table.pdf_document import PdfDocument, TaskType
+from pdf2train.core.table.pipeline_task import PipelineTask, TaskLifecycle, InstructionStatus
+
+from pdf2train.core.schema.pipeline_task_dto import PipelineTaskUpdateDTO
 
 from pdf2train.core.service.instruction_datum_service import InstructionDatumService
 from pdf2train.core.service.document_chunk_service import DocumentChunkService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
+from pdf2train.core.service.pipeline_task_service import PipelineTaskService
 
 from pdf2train.core.schema.base_schema import PageResult
 from pdf2train.core.schema.instruction_datum_dto import (
@@ -25,6 +29,7 @@ from pdf2train.core.schema.instruction_datum_dto import (
     InstructionDatumUpdateDTO, 
     InstructionDatumFilterDTO
 )
+
 
 
 class InstructionDatumManager:
@@ -35,12 +40,14 @@ class InstructionDatumManager:
         self,
         instruction_datum_service: InstructionDatumService,
         document_chunk_service: DocumentChunkService,
-        pdf_document_service: PdfDocumentService
+        pdf_document_service: PdfDocumentService,
+        pipeline_task_service: PipelineTaskService
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.service = instruction_datum_service
         self.document_chunk_service = document_chunk_service
         self.pdf_document_service = pdf_document_service
+        self.pipeline_task_service = pipeline_task_service
         
     async def list_instructions(
         self, 
@@ -63,63 +70,176 @@ class InstructionDatumManager:
         3. 更新 instruction datum 数据库
         4. 判断是否同步向量数据库
         """
-        
-        # 1. 查看现有的is_indexed等逻辑判断字段
-        db_result: InstructionDatum = await self.service.get_by_id(instruction_id)
-        if not db_result:
-            self.logger.warning(f"不存在的instruction_id: {instruction_id}")
-            return False
-        old_is_indexed_status = db_result.is_indexed
-        old_question = db_result.question
-        
-        # 2. Logic: If content changes, token count changes and index becomes invalid
-        if "question" in update_dto.model_fields_set:
-            new_question = update_dto.question
-            if new_question:
-                if new_question != old_question:
-                    update_dto.is_indexed = False
-                else:
-                    update_dto.is_indexed = old_is_indexed_status
-        
-        # 3. Call Service
-        success = await self.service.update(instruction_id, update_dto)
-        
-        if success:
-            # TODO: Async trigger vector deletion or re-embedding here if needed
-            # For now, we just marked is_indexed=False in SQL
+        try:
+            # 1. 查看现有的is_indexed等逻辑判断字段
+            db_result: InstructionDatum = await self.service.get_by_id(instruction_id)
+            if not db_result:
+                self.logger.warning(f"不存在的instruction_id: {instruction_id}")
+                return False
+            old_is_indexed_status = db_result.is_indexed
+            old_question = db_result.question
+            
+            # 2. 初始化is_indexed
+            if "question" in update_dto.model_fields_set:
+                new_question = update_dto.question
+                if new_question:
+                    if new_question != old_question:
+                        update_dto.is_indexed = False
+                    else:
+                        update_dto.is_indexed = old_is_indexed_status
+            
+            # 3. 更新数据表
+            success = await self.service.update(instruction_id, update_dto)
+            if not success: raise ValueError(f"更新数据表操作失败！{instruction_id}")
+            
+            # 4. 判断是否需要重新嵌入向量 
             if old_is_indexed_status and not update_dto.is_indexed:
-                # 重新嵌入向量 
                 self.logger.info("重新嵌入向量！")
                 pass
-            
-        return success
+                
+            return success
+        except Exception as e:
+            raise ValueError(f"更新指令数据{instruction_id}失败！{str(e)}") from e
     
-    async def delete_instruction(self, instruction_id: str) -> bool:
+    async def delete_instructions_batch(self, instruction_ids: List[str]) -> int:
         """
+        [核心逻辑] 批量删除指令数据
+        包含：DB删除、向量删除、Task状态检查
+        """
+        try:
+            if not instruction_ids:
+                return 0
+
+            # 1. 预查询：获取涉及的 doc_ids
+            affected_doc_ids = set()
+            
+            doc_id_map = await self.service.get_doc_ids_by_ids(instruction_ids) 
+            affected_doc_ids = set(doc_id_map.values())
+
+            # 2. 批量物理删除 (DB)
+            deleted_count = await self.service.delete_by_ids(instruction_ids)
+            if deleted_count == 0:
+                return 0
+
+            # 3. 批量删除向量 (Vector)
+            # await self.qdrant_service.delete_vectors(ids=instruction_ids)
+
+            # 4. 批量检查 Task 状态回滚
+            if affected_doc_ids:
+                counts_map = await self.service.get_counts_by_doc_ids(list(affected_doc_ids))
+                
+                for doc_id in affected_doc_ids:
+                    current_count = counts_map.get(doc_id, 0)
+                    if current_count == 0:
+                        task = await self.pipeline_task_service.get_specific_task_by_doc_id(
+                            doc_id, TaskType.INSTRUCTION_GEN.value
+                        )
+                        if task and task.status == TaskLifecycle.SUCCESS.value:
+                            await self.pipeline_task_service.update_and_refresh_parent_doc_status(
+                                task.id,
+                                PipelineTaskUpdateDTO(
+                                    status=TaskLifecycle.PENDING.value,
+                                    detailed_status=InstructionStatus.PENDING.value,
+                                    result_data=None
+                                )
+                            )
+                            self.logger.info(f"文档 {doc_id} 的指令已清空，Task 回滚为 PENDING")
+            return deleted_count
+        except Exception as e:
+            raise ValueError(f"[InstructionDatum]批量删除失败！{str(e)}") from e  
+    
+    async def delete_instruction(self, instruction_id: str) -> int:
+        """
+        [单个删除] 只是批量删除的特例
+        """
+        try:
+            count = await self.delete_instructions_batch([instruction_id])
+            return count > 0
+        except Exception as e:
+            raise ValueError(str(e)) from e
+    
+    async def delete_instruction_single(self, instruction_id: str) -> bool:
+        """
+        删除指定id指令数据
         1. 直接删除数据库数据
         2. 删除向量数据库
         """
-        # 1. 直接删除数据库数据
-        success = await self.service.delete(instruction_id)
-
-        if success:
-            # 2. 删除向量数据库
-            pass
+        try:
+            # 1. 首先获取db_data
+            db_data: InstructionDatum = await self.service.get_by_id(instruction_id)
+            if not db_data:
+                raise ValueError(f"[InstructionDatum]目标-{instruction_id}-不存在")
+            
+            # 2. 直接删除数据库数据
+            success = await self.service.delete(instruction_id)
+            if not success:
+                raise ValueError(f"[InstructionDatum]目标删除失败！-{instruction_id}-")
+            
+            # 3. 删除向量数据库
+            
+            # 4. 判断是否是最后一个删除，如果是更新对应的task状态为pending
+            counts_map: Dict[int, int] = await self.service.get_counts_by_doc_ids([db_data.doc_id])
+            if not counts_map.get(db_data.doc_id):
+                task_db_data: PipelineTask = await self.pipeline_task_service.get_specific_task_by_doc_id(db_data.doc_id, TaskType.INSTRUCTION_GEN.value)
+                task_update_status: bool = await self.pipeline_task_service.update_and_refresh_parent_doc_status(
+                    task_db_data.id,
+                    PipelineTaskUpdateDTO(
+                        status=TaskLifecycle.PENDING.value,
+                        detailed_status=InstructionStatus.PENDING.value,
+                        result_data=None
+                    )
+                )
+                if not task_update_status:
+                    raise ValueError(f"[PipelineTask]更新状态失败-{task_db_data.id}-")
             return success
-        return False
-    
+        except Exception as e:
+            raise ValueError(f"删除指令数据{instruction_id}失败！ {str(e)}") from e
+        
     async def clear_by_doc(self, doc_id: int) -> int:
         """
+        清空doc_id指令数据
         1. 直接删除数据库数据
         2. 删除向量数据库
         """
-        # 1. 直接删除数据库数据
-        success = await self.service.delete_by_doc_id(doc_id)
-        if success:
-            # 2. 删除向量数据库
-            pass
-            return success
-        return False
+        try:
+            # 1. 直接删除数据库数据
+            success = await self.service.delete_by_doc_id(doc_id)
+            if not success: raise ValueError(f"[InstructionDatum]清除指令数据失败！-{doc_id}-")
+            
+            # 2. 直接重置task为pending
+            task_db_data: PipelineTask = await self.pipeline_task_service.get_specific_task_by_doc_id(doc_id, TaskType.INSTRUCTION_GEN.value)
+            task_update_status: bool = await self.pipeline_task_service.update_and_refresh_parent_doc_status(
+                task_db_data.id,
+                PipelineTaskUpdateDTO(
+                    status=TaskLifecycle.PENDING.value,
+                    detailed_status=InstructionStatus.PENDING.value,
+                    result_data=None
+                )
+            )
+            if not task_update_status:
+                raise ValueError(f"[PipelineTask]重置任务状态失败！-{task_db_data.id}-")
+            
+            # 3. 删除向量数据库
+            return task_update_status
+        except Exception as e:
+            raise ValueError(f"清空doc_id指令数据！{doc_id} \n{str(e)}") from e
+    
+    async def check_cascade_impact(self, chunk_ids: List[str]) -> List[str]:
+        """
+        接口 1: 判断/预览
+        返回受影响的 ID 列表。如果是空列表，说明可以直接删 chunk，不需要确认。
+        """
+        return await self.service.get_ids_by_ref_chunk_ids(chunk_ids)
+    
+    async def check_cascade_impact_by_doc_id(self, doc_id: int) -> List[str]:
+        """
+        [Query] 根据文档 ID 查找所有【且 ref_chunk_ids 不为空】的指令数据 ID。
+        
+        筛选条件:
+        1. doc_id 匹配
+        2. ref_chunk_ids 数组长度大于 0 (即不仅仅是文档级指令，而是绑定了具体 Chunk 的指令)
+        """
+        return await self.service.get_ids_by_ref_ids_doc_id(doc_id)
     
     async def _export_single_doc(self, doc_id: int) -> List[Dict[str, Any]]:
         """
@@ -201,42 +321,45 @@ class InstructionDatumManager:
         [导出入口] 导出微调数据
         :param doc_id: 如果提供，导出指定文档；如果不提供 (None)，导出所有文档
         """
-        all_results = []
-        
-        if doc_id is not None:
-            # === 模式 A: 导出单个 ===
-            self.logger.info(f"开始导出单个文档: {doc_id}")
-            return await self._export_single_doc(doc_id)
-        else:
-            target_ids = []
-            # === 模式 B: 导出所有 ===
-            self.logger.info("开始导出所有文档数据...")
-            if kb_id is not None:
-                # 归一化为 List
-                kb_ids_list = kb_id if isinstance(kb_id, list) else [kb_id]
-                self.logger.info(f"开始导出知识库 {kb_ids_list} 下的数据...")
-                # 1. 查出该 KB 下所有的 doc_id
-                target_ids = await self.pdf_document_service.get_doc_ids_by_kb_ids(kb_ids_list)
-            else:    
-                # 1. 获取所有有数据的 doc_id
-                target_ids: List[int] = await self.service.get_all_instruction_doc_ids()
-                
-            self.logger.info(f"发现 {len(target_ids)} 个包含指令数据的文档")
-            if not target_ids:
-                self.logger.warning(f"知识库 {kb_ids_list} 下没有文档")
-                return []
+        try:
+            all_results = []
             
-            # 2. 循环处理
-            for idx, did in enumerate(target_ids):
-                # 打印进度日志
-                if idx % 10 == 0:
-                    self.logger.info(f"导出进度: {idx}/{len(target_ids)}")
+            if doc_id is not None:
+                # === 模式 A: 导出单个 ===
+                self.logger.info(f"开始导出单个文档: {doc_id}")
+                return await self._export_single_doc(doc_id)
+            else:
+                target_ids = []
+                # === 模式 B: 导出所有 ===
+                self.logger.info("开始导出所有文档数据...")
+                if kb_id is not None:
+                    # 归一化为 List
+                    kb_ids_list = kb_id if isinstance(kb_id, list) else [kb_id]
+                    self.logger.info(f"开始导出知识库 {kb_ids_list} 下的数据...")
+                    # 1. 查出该 KB 下所有的 doc_id
+                    target_ids = await self.pdf_document_service.get_doc_ids_by_kb_ids(kb_ids_list)
+                else:    
+                    # 1. 获取所有有数据的 doc_id
+                    target_ids: List[int] = await self.service.get_all_instruction_doc_ids()
+                    
+                self.logger.info(f"发现 {len(target_ids)} 个包含指令数据的文档")
+                if not target_ids:
+                    self.logger.warning(f"知识库 {kb_ids_list} 下没有文档")
+                    return []
                 
-                doc_data = await self._export_single_doc(did)
-                all_results.extend(doc_data)
-                
-            self.logger.info(f"全量导出完成，共生成 {len(all_results)} 条微调数据")
-            return all_results
+                # 2. 循环处理
+                for idx, did in enumerate(target_ids):
+                    # 打印进度日志
+                    if idx % 10 == 0:
+                        self.logger.info(f"导出进度: {idx}/{len(target_ids)}")
+                    
+                    doc_data = await self._export_single_doc(did)
+                    all_results.extend(doc_data)
+                    
+                self.logger.info(f"全量导出完成，共生成 {len(all_results)} 条微调数据")
+                return all_results
+        except Exception as e:
+            raise ValueError(f"导出微调数据失败：{doc_id} - {kb_id}")
     
     async def export_instructions_as_ingest_chunks(self, doc_id: int) -> List[Dict[str, Any]]:
         """

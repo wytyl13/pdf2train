@@ -922,8 +922,14 @@ class SqlProvider(
         [新增] 专用的分页查询方法
         返回: {'items': [...], 'total': 100, 'page': 1, 'size': 10}
         """
+        # 定义常量 (也可以放到类属性或配置文件中)
+        MAX_PAGE_SIZE = 1000
+        DEFAULT_PAGE_SIZE = 500
         async with self.get_db_session() as session:
             try:
+                # 处理 Page Size:
+                page = page if (page is not None and page > 0) else 1
+                page_size = DEFAULT_PAGE_SIZE if (page_size is None or page_size <= 0) else min(page_size, MAX_PAGE_SIZE)
                 # 1. 复用之前的逻辑构建 stmt (建议将构建逻辑提取为私有方法 _build_stmt，这里为了方便直接复制核心逻辑)
                 # -------------------------------------------------------------------------
                 all_fields = [column.key for column in self.model.__table__.columns]
@@ -1002,20 +1008,6 @@ class SqlProvider(
                 result = await session.execute(stmt)
                 records = result.scalars().all()
                 
-                """
-                records = result.fetchall()
-                # 5. 格式化数据
-                data_list = []
-                if len(query_fields) == len(all_fields):
-                     data_list = [
-                        {key: value for key, value in record[0].__dict__.items() 
-                         if key != '_sa_instance_state'}
-                        for record in records
-                    ]
-                else:
-                    data_list = [dict(zip(query_fields, record)) for record in records]
-                """
-
                 # 6. 返回分页结构
                 return {
                     "items": records,

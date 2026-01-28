@@ -36,10 +36,10 @@ class H1ContextAssembler:
         
         # 为了处理列表中的第一项，初始化逻辑
         if sorted_chunks:
-            current_h1_title = sorted_chunks[0]['metadata'].get('h1', '')
+            current_h1_title = sorted_chunks[0]['meta_info'].get('h1', '')
 
         for chunk in sorted_chunks:
-            chunk_h1 = chunk['metadata'].get('h1', '')
+            chunk_h1 = chunk['meta_info'].get('h1', '')
             
             if chunk_h1 != current_h1_title:
                 # 发现新章节 -> 结算上一章节
@@ -83,7 +83,7 @@ class H1ContextAssembler:
             id_mapping[short_id] = original_uuid
             
             # 2. 构建面包屑路径 (Breadcrumb)
-            path_str = self._build_breadcrumb(chunk['metadata'])
+            path_str = self._build_breadcrumb(chunk['meta_info'])
             
             # 3. 提取内容并去除多余空白
             content = chunk.get('content', '').strip()

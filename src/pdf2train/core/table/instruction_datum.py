@@ -7,7 +7,7 @@
 """
 
 import uuid
-from sqlalchemy import Column, Integer, String, BigInteger, Text, JSON, ForeignKey, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, BigInteger, Text, JSON, ForeignKey, Boolean, DateTime, Index, text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 
@@ -84,3 +84,11 @@ class InstructionDatum(Base):
     def q_type(self) -> str:
         """快捷访问元数据中的类型"""
         return self.meta_info.get('type', 'general')
+    
+    __table_args__ = (
+        Index(
+            'idx_instruction_datum_ref_chunk_ids',
+            text("(ref_chunk_ids::jsonb)"), # 强转为 jsonb 建索引
+            postgresql_using='gin'
+        ),
+    )

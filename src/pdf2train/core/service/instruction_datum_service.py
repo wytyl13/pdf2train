@@ -8,7 +8,7 @@
 
 
 from typing import List, Dict, Any, Optional
-from sqlalchemy import select, func, or_, delete, update
+from sqlalchemy import select, func, or_, delete, update, cast, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
@@ -16,11 +16,15 @@ import logging
 from pdf2train.core.configs.sql_config import SqlConfig
 from pdf2train.core.provider.sql_provider import SqlProvider
 from pdf2train.core.table.instruction_datum import InstructionDatum
+from pdf2train.core.table.pdf_document import PdfDocument
+from pdf2train.core.table.document_chunk import DocumentChunk
+
 from pdf2train.core.schema.instruction_datum_dto import (
     InstructionDatumCoreDTO, 
     InstructionDatumUpdateDTO, 
     InstructionDatumFilterDTO
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 
@@ -62,6 +66,70 @@ class InstructionDatumService:
     async def get_by_doc_id(self, doc_id: int) -> List[InstructionDatum]:
         return await self.sql_provider.get_record_by_condition({"doc_id": doc_id})
     
+    async def get_ids_by_ref_chunk_ids(self, chunk_ids: List[str]) -> List[str]:
+        """
+        [PostgreSQL 专用优化版]
+        找到所有参考了该 chunk_ids 列表及其子集的指令数据ID。
+        """
+        if not chunk_ids:
+            return []
+
+        async with self.sql_provider.get_db_session() as session:
+            conditions = [
+                cast(self.model.ref_chunk_ids, JSONB).contains([cid])
+                for cid in chunk_ids
+            ]
+
+            # 修改点：select(self.model) -> select(self.model.id)
+            # 仅查询 ID 列，减少数据传输
+            stmt = select(self.model.id).where(or_(*conditions))
+            
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+    
+    async def get_doc_ids_by_ids(self, ids: List[str]) -> Dict[str, int]:
+        """[新增] 根据指令ID列表查询对应的文档ID"""
+        if not ids: return {}
+        async with self.sql_provider.get_db_session() as session:
+            # 只查 id 和 doc_id 两个字段
+            stmt = select(self.model.id, self.model.doc_id).where(self.model.id.in_(ids))
+            result = await session.execute(stmt)
+            # 返回 {instruction_id: doc_id}
+            return {row.id: row.doc_id for row in result}
+    
+    async def get_ids_by_ref_ids_doc_id(self, doc_id: int) -> List[str]:
+        """
+        [Query] 根据文档 ID 查找所有【且 ref_chunk_ids 不为空】的指令数据 ID。
+        
+        筛选条件:
+        1. doc_id 匹配
+        2. ref_chunk_ids 数组长度大于 0 (即不仅仅是文档级指令，而是绑定了具体 Chunk 的指令)
+        """
+        async with self.sql_provider.get_db_session() as session:
+            stmt = select(self.model.id).where(
+                and_(
+                    self.model.doc_id == doc_id,
+                    func.jsonb_array_length(cast(self.model.ref_chunk_ids, JSONB)) > 0
+                )
+            )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+    
+    async def delete_by_ids(self, ids: List[str]) -> int:
+        """
+        [Command] 仅删除：根据 ID 列表物理删除
+        通用性极强，不依赖 chunk 逻辑，任何需要删 instruction 的地方都能用
+        """
+        if not ids:
+            return 0
+
+        async with self.sql_provider.get_db_session() as session:
+            # 直接 where id in (...)
+            stmt = delete(self.model).where(self.model.id.in_(ids))
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount
+    
     async def get_counts_by_doc_ids(self, doc_ids: List[int]) -> Dict[int, int]:
         """
         批量统计文档的 instruction 数量
@@ -71,44 +139,34 @@ class InstructionDatumService:
 
         # 1. 使用 async with 获取上下文管理的 session
         async with self.sql_provider.get_db_session() as session:
-            try:
-                # 2. 构建查询语句
-                stmt = (
-                    select(self.model.doc_id, func.count(self.model.id))
-                    .where(self.model.doc_id.in_(doc_ids))
-                    .group_by(self.model.doc_id)
-                )
+            # 2. 构建查询语句
+            stmt = (
+                select(self.model.doc_id, func.count(self.model.id))
+                .where(self.model.doc_id.in_(doc_ids))
+                .group_by(self.model.doc_id)
+            )
+            
+            # 3. 执行查询
+            result = await session.execute(stmt)
+            
+            # 4. 转换结果为字典 {doc_id: count}
+            return dict(result.all())
                 
-                # 3. 执行查询
-                result = await session.execute(stmt)
-                
-                # 4. 转换结果为字典 {doc_id: count}
-                return dict(result.all())
-                
-            except Exception as e:
-                self.logger.error(f"批量统计失败: {e}")
-                # 如果 get_db_session 内部没有吞掉异常，这里可以 raise，也可以返回空字典
-                return {}
-    
     async def get_all_instruction_doc_ids(self) -> List[int]:
         """
         [辅助方法] 获取所有包含指令数据的文档 ID (去重)
         """
-        try:
-            records: List[InstructionDatum] = await self.sql_provider.get_record_by_condition(condition={}, fields=["doc_id"])
-            
-            # 提取并去重
-            doc_ids = set()
-            for r in records:
-                # 兼容字典或对象访问
-                did = r.doc_id
-                if did:
-                    doc_ids.add(int(did))
-            
-            return list(doc_ids)
-        except Exception as e:
-            self.logger.error(f"获取文档ID列表失败: {e}")
-            return []
+        records: List[InstructionDatum] = await self.sql_provider.get_record_by_condition(condition={}, fields=["doc_id"])
+        
+        # 提取并去重
+        doc_ids = set()
+        for r in records:
+            # 兼容字典或对象访问
+            did = r.doc_id
+            if did:
+                doc_ids.add(int(did))
+        
+        return list(doc_ids)
     
     async def get_valid_by_doc_id(self, doc_id: int) -> List[InstructionDatum]:
         """
@@ -120,6 +178,87 @@ class InstructionDatumService:
             condition={"doc_id": doc_id},
             filters=[self.model.is_valid.in_([0, 1])]
         )
+    
+    async def export_instructions_as_ingest_chunks(self, doc_id: int) -> List[Dict[str, Any]]:
+        """
+        将指令数据导出为待入库的 Chunk 格式
+        """
+        ingest_chunks = []
+        async with self.sql_provider.get_db_session() as session:
+            # 1. 获取文件名
+            stmt_doc = select(PdfDocument.file_name).where(PdfDocument.id == doc_id)
+            result_doc = await session.execute(stmt_doc)
+            file_name = result_doc.scalar() or "Generated_Instruction"
+
+            # 2. 获取该文档下所有【有效】的指令数据
+            stmt_inst = select(InstructionDatum).where(
+                InstructionDatum.doc_id == doc_id,
+                or_(InstructionDatum.is_valid != -1, InstructionDatum.is_valid.is_(None))
+            )
+            result_inst = await session.execute(stmt_inst)
+            all_instructions = result_inst.scalars().all()
+
+            if not all_instructions:
+                return []
+
+            # 3. 批量获取关联的 DocumentChunk 原始文本
+            all_ref_ids = set()
+            for inst in all_instructions:
+                refs = inst.ref_chunk_ids
+                if refs:
+                    all_ref_ids.update(refs)
+            
+            chunk_map = {}
+            if all_ref_ids:
+                stmt_chunk = select(DocumentChunk.id, DocumentChunk.content).where(
+                    DocumentChunk.document_id == doc_id
+                )
+                result_chunk = await session.execute(stmt_chunk)
+                
+                for row in result_chunk:
+                    chunk_map[str(row.id)] = row.content
+
+            # 4. 转换为 Ingestion 格式
+            for inst in all_instructions:
+                # 4.1. 提取基础字段 (直接属性访问)
+                datum_id = inst.id
+                question = inst.question
+                answer = inst.answer
+                ref_ids = inst.ref_chunk_ids or []
+                q_type = inst.type or "general"
+
+                # 4.2. 构建上下文 (Context)
+                context_text = ""
+                if ref_ids:
+                    # RAG 模式：拼接原始切片内容
+                    texts = [chunk_map.get(str(rid), "") for rid in ref_ids if str(rid) in chunk_map]
+                    context_text = "\n\n".join(texts)
+                else:
+                    # 非 RAG 模式：上下文就是答案本身 (或者留空)
+                    context_text = answer
+
+                # 4.3. 构建 Metadata
+                metadata = {
+                    "chunk_id": str(datum_id),       # 使用 InstructionDatum 的 UUID
+                    "doc_id": doc_id,                # 关联文档 ID
+                    "doc_kb_id": doc_id,             # 兼容之前的 KB 逻辑
+                    "filename": file_name,           # 文件名
+                    "type": "instruction",           # 标记数据类型
+                    "q_type": q_type,                # 指令类型
+                    "answer": answer,                # 答案
+                    "context": context_text,         # 原始参考资料
+                    "ref_chunk_ids": ref_ids,        # 引用列表
+                    "is_instruction": True           # 显式标记
+                }
+
+                # 3.4. 构造标准切片对象
+                item = {
+                    "text": question, # 向量化目标是 Question
+                    "metadata": metadata
+                }
+                ingest_chunks.append(item)
+        return ingest_chunks
+
     
     async def search_paginated(
         self, 

@@ -10,7 +10,7 @@
 
 import logging
 import json
-from typing import List, Optional, Tuple, AsyncGenerator, Dict
+from typing import List, Optional, Tuple, AsyncGenerator, Dict, Any
 from sqlalchemy import text, select, desc, asc, func
 
 from pdf2train.core.provider.sql_provider import SqlProvider
@@ -96,25 +96,71 @@ class DocumentChunkService:
 
         # 1. 使用 async with 获取上下文管理的 session
         async with self.sql_provider.get_db_session() as session:
-            try:
-                # 2. 构建查询语句
-                stmt = (
-                    select(self.model.document_id, func.count(self.model.id))
-                    .where(self.model.document_id.in_(doc_ids))
-                    .group_by(self.model.document_id)
-                )
+            # 2. 构建查询语句
+            stmt = (
+                select(self.model.document_id, func.count(self.model.id))
+                .where(self.model.document_id.in_(doc_ids))
+                .group_by(self.model.document_id)
+            )
+            
+            # 3. 执行查询
+            result = await session.execute(stmt)
+            
+            # 4. 转换结果为字典 {doc_id: count}
+            return dict(result.all())
                 
-                # 3. 执行查询
-                result = await session.execute(stmt)
-                
-                # 4. 转换结果为字典 {doc_id: count}
-                return dict(result.all())
-                
-            except Exception as e:
-                self.logger.error(f"批量统计失败: {e}")
-                # 如果 get_db_session 内部没有吞掉异常，这里可以 raise，也可以返回空字典
-                return {}
+    async def export_chunks_json(self, doc_id: int) -> List[Dict[str, Any]]:
     
+        """Business Logic: Get DB Models -> Convert to plain Dict for JSON export"""
+        chunks: List[DocumentChunk] = await self.get_all_by_doc_id(doc_id)
+        # Using Pydantic Schema to dump to dict
+        return [DocumentChunkCoreDTO.model_validate(c).model_dump() for c in chunks]
+    
+    async def export_chunks_as_ingest_chunks(self, doc_id: int) -> List[Dict[str, Any]]:
+        """
+        [向量化专用] 将文档原始切片导出为标准入库格式
+        用于和 Instruction 数据合并后一同入库
+        """
+            
+        # 1. 查询该文档所有切片，document_chunk表格没有is_valid这个字段
+        stmt = text("""
+            SELECT * FROM document_chunks 
+            WHERE document_id = :doc_id 
+            ORDER BY chunk_index ASC
+        """)
+        async with self.sql_provider.get_db_session() as session:
+            result = await session.execute(stmt, {"doc_id": doc_id})
+            rows = result.fetchall()
+        
+        ingest_list = []
+        for row in rows:
+            # 2. 准备 Metadata
+            # 将数据库里的 meta_info (通常包含 h1, h2 等) 作为基础
+            # 注意：根据你的数据库驱动，meta_info 可能是 dict 也可能是 str
+            base_meta = row.meta_info if isinstance(row.meta_info, dict) else {}
+            
+            # 3. 注入关键系统字段
+            # 显式标记类型，以便在 Qdrant 里区分这是“原文”还是“指令”
+            metadata = {
+                **base_meta,             # 展开原有的元数据
+                "chunk_id": str(row.id), # 统一 ID 字段名
+                "doc_id": row.document_id,
+                "doc_kb_id": row.document_id, # 兼容之前的字段
+                "filename": base_meta.get("filename", ""), 
+                "chunk_index": row.chunk_index,
+                "type": "document_chunk", # <--- 核心区分字段：这是原文
+                "is_instruction": False
+            }
+
+            # 4. 构造标准格式
+            # 原文切片的 text 就是 content
+            item = {
+                "text": row.content, 
+                "metadata": metadata
+            }
+            ingest_list.append(item)
+        return ingest_list
+            
     async def generate_pretrain_stream(self, doc_ids: List[int]) -> AsyncGenerator[str, None]:
         """Stream generator for pretrain data"""
         sql_provider = SqlProvider(model=DocumentChunk)

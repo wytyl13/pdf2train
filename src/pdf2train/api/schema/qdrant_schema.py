@@ -30,7 +30,15 @@ class UnbindKbId(BaseModel):
     collection_name: str
     kb_id: int
     
-    
+class DocKbBindRequest(BaseModel):
+    """
+    [新增] 文档与知识库绑定请求
+    用于 /qdrant/bind_kb 接口
+    """
+    doc_ids: List[int] = Field(..., description="需要更新的文档ID列表")
+    kb_id: int = Field(..., description="目标知识库ID")
+
+
 class VectorDeleteRequest(BaseModel):
     """
     向量删除请求参数 (升级版)
@@ -57,27 +65,6 @@ class VectorDeleteRequest(BaseModel):
         return values
 
 
-
-class ChunkPayload(BaseModel):
-    text: str
-    metadata: Dict[str, Any] = {}
-
-
 class EmbeddingRunRequest(BaseModel):
     """触发向量化任务的请求参数"""
     doc_id: int = Field(..., description="文档ID")
-
-
-class EmbeddingConfigOverride(BaseModel):
-    """
-    允许请求动态指定 API 地址 (例如临时切换到云端)
-    """
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    model_name: Optional[str] = None
-
-
-class IngestRequest(BaseModel):
-    chunks: List[ChunkPayload]
-    # 可选：本次请求专用的 API 配置
-    embed_config: Optional[EmbeddingConfigOverride] = None

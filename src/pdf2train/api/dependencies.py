@@ -24,7 +24,7 @@ from pdf2train.core.service.pipeline_task_service import PipelineTaskService
 from pdf2train.core.service.pdf2md_service import Pdf2MdService
 from pdf2train.core.service.document_chunk_service import DocumentChunkService
 from pdf2train.core.service.instruction_datum_service import InstructionDatumService
-
+from pdf2train.core.service.embedding_sql_service import EmbeddingSqlService
 
 # 导入 Manager
 from pdf2train.core.manager.pdf_document_manager import PdfDocumentManager
@@ -36,7 +36,8 @@ from pdf2train.core.manager.pdf2md_manager import Pdf2MdManager
 from pdf2train.core.manager.document_chunk_manager import DocumentChunkManager
 from pdf2train.core.manager.instruction_datum_manager import InstructionDatumManager
 from pdf2train.core.manager.chunk_manager import ChunkManager
-
+from pdf2train.core.manager.instruction_gen_manager import InstructionGenManager
+from pdf2train.core.manager.qdrant_manager import QdrantManager
 
 ROOT_DIRECTORY = Path(__file__).parent.parent.parent.parent
 ENV_PATH = str(ROOT_DIRECTORY / ".env")
@@ -107,6 +108,13 @@ def get_instruction_datum_service(
     sql_config: Optional[SqlConfig] = Depends(get_sql_config)
 ):
     return InstructionDatumService(
+        sql_config=sql_config
+    )
+    
+def get_embedding_sql_service(
+    sql_config: Optional[SqlConfig] = Depends(get_sql_config)
+):
+    return EmbeddingSqlService(
         sql_config=sql_config
     )
     
@@ -183,12 +191,14 @@ def get_document_chunk_manager(
 def get_instruction_datum_manager(
     instruction_datum_service: PdfDocumentService = Depends(get_instruction_datum_service),
     document_chunk_service: DocumentChunkService = Depends(get_document_chunk_service),
-    pdf_document_service: PdfDocumentService = Depends(get_pdf_service)
+    pdf_document_service: PdfDocumentService = Depends(get_pdf_service),
+    pipeline_task_service: PipelineTaskService = Depends(get_pipeline_task_service)
 ):
     return InstructionDatumManager(
         instruction_datum_service=instruction_datum_service,
         document_chunk_service=document_chunk_service,
         pdf_document_service=pdf_document_service,
+        pipeline_task_service=pipeline_task_service
     )
     
 def get_chunk_manager(
@@ -202,5 +212,41 @@ def get_chunk_manager(
         document_chunk_service=document_chunk_service,
         pipeline_task_service=pipeline_task_service,
         minio_service=minio_service
+    )
+
+def get_instruction_gen_manager(
+    pdf_document_service: PdfDocumentService = Depends(get_pdf_service),
+    document_chunk_service: DocumentChunkService = Depends(get_document_chunk_service),
+    instruction_datum_service: InstructionDatumService = Depends(get_instruction_datum_service),
+    pipeline_task_service: PipelineTaskService = Depends(get_pipeline_task_service),
+    llm_config_service: LLMConfigService = Depends(get_llm_config_service),
+    qdrant_service: QdrantService = Depends(get_qdrant_service),
+):
+    return InstructionGenManager(
+        pdf_document_service=pdf_document_service,
+        document_chunk_service=document_chunk_service,
+        instruction_datum_service=instruction_datum_service,
+        pipeline_task_service=pipeline_task_service,
+        llm_config_service=llm_config_service,
+        qdrant_service=qdrant_service
+    )
+    
+def get_qdrant_manager(
+    embedding_sql_service: EmbeddingSqlService = Depends(get_embedding_sql_service),
+    document_chunk_service: DocumentChunkService = Depends(get_document_chunk_service),
+    pipeline_task_service: PipelineTaskService = Depends(get_pipeline_task_service),
+    pdf_document_service: PdfDocumentService = Depends(get_pdf_service),
+    instruction_datum_service: InstructionDatumService = Depends(get_instruction_datum_service),
+    llm_config_service: LLMConfigService = Depends(get_llm_config_service),
+    qdrant_service: QdrantService = Depends(get_qdrant_service),
+):
+    return QdrantManager(
+        embedding_sql_service=embedding_sql_service,
+        document_chunk_service=document_chunk_service,
+        pipeline_task_service=pipeline_task_service,
+        pdf_document_service=pdf_document_service,
+        instruction_datum_service=instruction_datum_service,
+        llm_config_service=llm_config_service,
+        qdrant_service=qdrant_service
     )
 

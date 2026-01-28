@@ -249,6 +249,23 @@ async def update_document(self, doc_id: int, data: Dict[str, Any], confirm_sync:
 8、需要完成instruction_gen_manager模块操作
 9、需要完成embedding_manager模块操作
 10、需要完成步骤progress更新和对应的doc progress更新
+11、instruction ge模块阻塞主线程，需要优化
 
+# 20260127
+1、完成所有模块（除了嵌入向量相关）
+2、待完成嵌入向量相关的模块，分别为嵌入、检索、嵌入操作数据库更新等
+3、待完成嵌入向量相关模块之后在document  document chunk   instruction knowledge_base模块中对接嵌入向量模块STR
 
+# 20260128
+1、完成document chunk router 级联删除操作
+    在router中区分模块进行级联删除：删除指定chunk，级联删除参考该chunk的 instruction datum 数据
+    这里的级联删除不包含删除某个chunk对应的删除该chunk对应的向量数据库，也不包含删除instruction datum 
+    对应要删除的向量数据库，这些向量数据库和任务状态更新和对应的chunk  instruction模块绑定
+    如果在router层面同时要考虑这些，就很复杂了，所以在各自的大模块之内考虑这些细节
+
+2、完成嵌入操作
+    待优化知识库添加文件删除文件接口
+    现在是不传递vector_store_collection_name参数，如果不传递，在现有的接口下无法再删除文件的时候知道去哪个collection_name下删除，vector_store_collection_name在创建知识库的时候默认为embedding_name，一经创建不可修改
+    后续如果要使用bge-m3模型则需要手动修改以前初始化的知识库（因为他们的vector_store_collection_name字段是阿里的模型）
+    待完善向量数据库删除接口并同步到其他模块
 

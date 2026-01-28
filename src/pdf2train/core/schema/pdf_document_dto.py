@@ -19,6 +19,8 @@ class PdfDocCoreDTO(BaseModel):
     [Core DTO] 对应 PdfDocument 表
     包含所有数据库字段，作为 Service -> Manager 的标准传输对象
     """
+    model_config = ConfigDict(from_attributes=True)
+    
     id: int = None # 创建的时候忽略该id字段
     bucket_name: str
     object_name: str

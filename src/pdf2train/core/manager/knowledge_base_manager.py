@@ -12,6 +12,11 @@ from typing import Dict, Any, List, Optional
 # import dto
 from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO
 from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO
+
+from pdf2train.core.table.knowledge_base import KnowledgeBase
+from pdf2train.core.schema.retrieval_dto import RetrievalSettings
+
+from pdf2train.core.schema.base_schema import PageResult
 # import service
 from pdf2train.core.service.knowledge_base_service import KnowledgeBaseService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
@@ -69,6 +74,7 @@ class KnowledgeBaseManager:
     # ================= 业务接口 =================
     async def create_kb(self, dto: KnowledgeBaseCoreDTO) -> int:
         """创建知识库"""
+        dto.vector_store_collection_name = dto.embedding_model
         return await self.kb_service.create(dto)
     
     async def update_kb(self, kb_id: int, dto: KnowledgeBaseUpdateDTO) -> bool:
@@ -81,12 +87,21 @@ class KnowledgeBaseManager:
     
     async def get_kb_list(
         self, 
-        page: int, 
-        page_size: int, 
+        page: Optional[int] = None, 
+        page_size: Optional[int] = None, 
         keyword: str = None
-    ):
-        """获取列表，这里的_setting可能涉及到前端兼容性问题"""
-        return await self.kb_service.search_paginated(page, page_size, keyword)
+    ) -> Dict[str, KnowledgeBaseCoreDTO | int]:
+        """分页查询知识库列表"""
+        try:
+            db_result: Dict[str, KnowledgeBase | int] = await self.kb_service.search_paginated(page, page_size, keyword)
+            default_settings: RetrievalSettings = RetrievalSettings()
+            kb_list: List[KnowledgeBase] = db_result.get("items")
+            if kb_list:
+                for item in kb_list:
+                    item.a_settings = default_settings if item.a_settings is None else item.a_settings
+            return PageResult[KnowledgeBaseCoreDTO](**db_result)
+        except Exception as e:
+            raise ValueError(f"分页查询知识库列表失败！{str(e)}") from e
         
     async def delete_kb(self, kb_id: int) -> bool:
         """
