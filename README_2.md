@@ -266,6 +266,65 @@ async def update_document(self, doc_id: int, data: Dict[str, Any], confirm_sync:
 2、完成嵌入操作
     待优化知识库添加文件删除文件接口
     现在是不传递vector_store_collection_name参数，如果不传递，在现有的接口下无法再删除文件的时候知道去哪个collection_name下删除，vector_store_collection_name在创建知识库的时候默认为embedding_name，一经创建不可修改
+    后台的向量嵌入服务按照一并按照model_name去定义collection_name，因此在初始化知识库的时候，vector_store_collection_name严格等于model_name，这样在删除接口被调用的时候传递vector_store_collection_name才会找到对应的向量库删除，否则会报错
+    也就是说model_name, vector_store_collection_name, collection_name完全统一口径。
     后续如果要使用bge-m3模型则需要手动修改以前初始化的知识库（因为他们的vector_store_collection_name字段是阿里的模型）
     待完善向量数据库删除接口并同步到其他模块
+
+# 20260130
+1、修改pdf_document的llm配置字段为配置id
+2、修改knowledge_base的llm配置字段为配置id
+3、并同步更新对应修改后的接口
+
+# 20230131
+1、获取collection_name，注意统一使用model_name去定义collection_name。这里要和agent后端接口处理一致
+2、物理删除向量数据（稀疏和密集）完成
+    物理删除某一个chunk  async def delete_chunk(self, chunk_id: str) -> bool:
+    物理删除某一个指令数据  async def delete_instructions_batch(self, instruction_ids: List[str]) -> int:
+    物理删除某一个doc_id对应的所有chunk  async def delete_chunks_by_doc_id(self, doc_id: int) -> int:
+    物理删除某一个doc_id对应的所有指令数据 async def clear_by_doc(self, doc_id: int) -> int:
+
+    注意删除某一个或所有chunk会造成对应指令数据的删除，所以要兼容删除对应的嵌入向量
+    物理删除某一批指令数据 async def delete_instructions_batch(self, instruction_ids: List[str]) -> int:
+
+3、更新向量数据
+    更新某个chunk 
+        async def update_chunk(
+            self, 
+            chunk_id: str, 
+            update_dto: DocumentChunkUpdateDTO
+        ) -> bool:
+    更新某个instruction
+        async def update_instruction(
+            self,
+            instruction_id: str,
+            update_dto: InstructionDatumUpdateDTO
+        ) -> bool:
+
+    拒绝某个instruction
+        async def update_instruction(
+            self,
+            instruction_id: str,
+            update_dto: InstructionDatumUpdateDTO
+        ) -> bool:
+        如果已经被嵌入，直接删除
+    批准某个instruction
+        async def update_instruction(
+        不论之前状态如何，直接嵌入
+        
+    新增知识库绑定
+    删除知识库绑定
+    在文件卡片上操作修改知识库绑定功能
+    不可修改知识库嵌入模型
+    可以修改某个文件的嵌入模型，修改需要提醒并且同步向量数据库
+
+4、步骤状态同步（未完成）完成
+    1、删除完指令微调数据或者语义块数据，不会重置语义嵌入步骤的状态
+    2、执行完document_chunk步骤操作，会激活下一步，但是不会讲下一步从成功状态重置为pendinig，导致没有办法去操作下一步
+    3、但是这里如果在删除chunk或者instruction之后，将task的状态同步，那么在重新生成chunk或者instruction之后就会激活新的下一步状态
+    4、但是这里的删除全量清空chunk或者instruction一般不需要再生成环境中使用，测试环境中可能会用
+    5、每个步骤在执行的时候都会先清空之前的任务产生的数据
+
+5、更新操作（同步向量库）未完成
+6、绑定或解绑知识库操作（未完成）
 

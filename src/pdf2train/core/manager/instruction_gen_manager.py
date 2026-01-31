@@ -164,7 +164,7 @@ class InstructionGenManager:
             # 获取使用的模型名称用于记录
             config: LLMConfig  = await self.llm_config_service.get_config_by_doc_id(
                 doc_id=doc_id, 
-                field_llm_name='instruction_gen_llm_config'
+                field_llm_id_name='instruction_gen_llm_config_id'
             )
             
             # 7. 执行 LLM 生成循环

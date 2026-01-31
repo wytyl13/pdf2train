@@ -20,9 +20,9 @@ class PdfDocCreateReq(BaseModel):
     author: Optional[str] = Field(default=None, description="作者")
     original_title: Optional[str] = Field(default=None, description="原标题")
     summary: Optional[str] = Field(default=None, description="摘要/简介")
-    instruction_gen_llm_config: Optional[str] = None
-    h_title_llm_config: Optional[str] = None
-    embedding_llm_config: Optional[str] = None
+    instruction_gen_llm_config_id: Optional[int] = None
+    h_title_llm_config_id: Optional[int] = None
+    embedding_llm_config_id: Optional[int] = None
     
     
 class PdfDocUpdateReq(BaseModel):
@@ -36,9 +36,9 @@ class PdfDocUpdateReq(BaseModel):
     original_title: Optional[str] = None
     summary: Optional[str] = None
     kb_id: Optional[int] = None
-    instruction_gen_llm_config: Optional[str] = None
-    h_title_llm_config: Optional[str] = None
-    embedding_llm_config: Optional[str] = None
+    instruction_gen_llm_config_id: Optional[int] = None
+    h_title_llm_config_id: Optional[int] = None
+    embedding_llm_config_id: Optional[int] = None
     confirm_sync: bool = Field(default=False, description="是否强制同步并重建向量")
 
 

@@ -15,12 +15,11 @@ class KnowledgeBaseCoreDTO(BaseModel):
     """创建知识库 DTO (数据库字段)"""
     model_config = ConfigDict(from_attributes=True)
     
-    id: int
+    id: Optional[int] = None
     name: str
     description: Optional[str] = None
     avatar_url: Optional[str] = None
-    embedding_model: str
-    vector_store_collection_name: str
+    embedding_model_id: int
     user_id: int
     a_settings: Optional[RetrievalSettings] = None  # 注意: 数据库字段名为 _settings
     is_public: bool = False
@@ -29,6 +28,7 @@ class KnowledgeBaseUpdateDTO(BaseModel):
     """更新知识库 DTO"""
     name: Optional[str] = None
     description: Optional[str] = None
+    embedding_model_id: Optional[int] = None
     avatar_url: Optional[str] = None
     a_settings: Optional[RetrievalSettings] = None
     is_public: Optional[bool] = None

@@ -15,6 +15,8 @@ from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO
 
 from pdf2train.core.table.knowledge_base import KnowledgeBase
 from pdf2train.core.schema.retrieval_dto import RetrievalSettings
+from pdf2train.core.table.llm_config import LLMConfig
+from pdf2train.core.table.llm_enum import ModelType
 
 from pdf2train.core.schema.base_schema import PageResult
 # import service
@@ -74,7 +76,6 @@ class KnowledgeBaseManager:
     # ================= 业务接口 =================
     async def create_kb(self, dto: KnowledgeBaseCoreDTO) -> int:
         """创建知识库"""
-        dto.vector_store_collection_name = dto.embedding_model
         return await self.kb_service.create(dto)
     
     async def update_kb(self, kb_id: int, dto: KnowledgeBaseUpdateDTO) -> bool:
@@ -84,6 +85,18 @@ class KnowledgeBaseManager:
     async def get_kb_detail(self, kb_id: int) -> Dict[str, Any]:
         """获取详情"""
         return await self.kb_service.get_by_id(kb_id)
+    
+    async def get_collection_name_by_kb_id(self, kb_id: int) -> Dict[str, Any]:
+        """
+        获取collection_name，注意统一使用model_name去定义collection_name
+        这里要和agent后端接口处理一致
+        """
+        try:
+            kb_data: KnowledgeBase =  await self.kb_service.get_by_id(kb_id)
+            embedding_data: LLMConfig = await self.llm_config_service.get_by_id(kb_data.embedding_model_id)
+            return embedding_data.model_name
+        except Exception as e:
+            raise ValueError(f"获取collection_name失败！{str(e)}") from e
     
     async def get_kb_list(
         self, 
@@ -98,6 +111,8 @@ class KnowledgeBaseManager:
             kb_list: List[KnowledgeBase] = db_result.get("items")
             if kb_list:
                 for item in kb_list:
+                    # default_embedding_config: LLMConfig = await self.llm_config_service.get_active_config(model_type=ModelType.EMBEDDING)
+                    # item.embedding_model_id = default_embedding_config.id if item.embedding_model_id is None else item.embedding_model_id
                     item.a_settings = default_settings if item.a_settings is None else item.a_settings
             return PageResult[KnowledgeBaseCoreDTO](**db_result)
         except Exception as e:

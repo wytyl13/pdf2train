@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pdf2train.core.table.instruction_datum import InstructionDatum
 from pdf2train.core.table.document_chunk import DocumentChunk
 from pdf2train.core.table.pdf_document import PdfDocument, TaskType
-from pdf2train.core.table.pipeline_task import PipelineTask, TaskLifecycle, InstructionStatus
+from pdf2train.core.table.pipeline_task import PipelineTask, TaskLifecycle, InstructionStatus, IndexStatus
 
 from pdf2train.core.schema.pipeline_task_dto import PipelineTaskUpdateDTO
 
@@ -22,6 +22,8 @@ from pdf2train.core.service.instruction_datum_service import InstructionDatumSer
 from pdf2train.core.service.document_chunk_service import DocumentChunkService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
 from pdf2train.core.service.pipeline_task_service import PipelineTaskService
+from pdf2train.core.service.llm_config_service import LLMConfigService
+from pdf2train.core.service.qdrant_service import QdrantService
 
 from pdf2train.core.schema.base_schema import PageResult
 from pdf2train.core.schema.instruction_datum_dto import (
@@ -29,6 +31,7 @@ from pdf2train.core.schema.instruction_datum_dto import (
     InstructionDatumUpdateDTO, 
     InstructionDatumFilterDTO
 )
+from pdf2train.core.schema.qdrant_dto import VectorDeleteRequest, ChunkPayload, IngestRequest, EmbeddingConfigOverride
 
 
 
@@ -41,13 +44,17 @@ class InstructionDatumManager:
         instruction_datum_service: InstructionDatumService,
         document_chunk_service: DocumentChunkService,
         pdf_document_service: PdfDocumentService,
-        pipeline_task_service: PipelineTaskService
+        pipeline_task_service: PipelineTaskService,
+        llm_config_service: LLMConfigService,
+        qdrant_service: QdrantService
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.service = instruction_datum_service
         self.document_chunk_service = document_chunk_service
         self.pdf_document_service = pdf_document_service
         self.pipeline_task_service = pipeline_task_service
+        self.llm_config_service = llm_config_service
+        self.qdrant_service = qdrant_service
         
     async def list_instructions(
         self, 
@@ -73,11 +80,35 @@ class InstructionDatumManager:
         try:
             # 1. 查看现有的is_indexed等逻辑判断字段
             db_result: InstructionDatum = await self.service.get_by_id(instruction_id)
-            if not db_result:
-                self.logger.warning(f"不存在的instruction_id: {instruction_id}")
-                return False
+            if not db_result: raise ValueError(f"指令数据{instruction_id}不存在")
             old_is_indexed_status = db_result.is_indexed
             old_question = db_result.question
+            old_is_valid = db_result.is_valid
+            should_vector = False
+            
+            # 2. 处理 is_valid 状态变更逻辑
+            if "is_valid" in update_dto.model_fields_set:
+                new_is_valid = update_dto.is_valid
+                
+                # 场景 A: 从 有效(0/1) 变为 无效(-1) 且是已嵌入状态 -> 删除向量
+                if old_is_valid != -1 and new_is_valid == -1 and old_is_indexed_status:
+                    # 直接删除向量
+                    collection_name = await self.llm_config_service.get_collection_name_by_doc_id(db_result.doc_id)
+                    vector_delete_request = VectorDeleteRequest(
+                        collection_name=collection_name,
+                        filters={"chunk_id": instruction_id}
+                    )
+                    del_count = await self.qdrant_service.delete_vector(vector_delete_request)
+                    # 标记数据库为未索引
+                    update_dto.is_indexed = False
+                    # 后续不再重新嵌入
+                    old_is_indexed_status = False 
+                    
+                # 场景 B: 从 无效(-1) 变为 有效(0/1) 不论旧的嵌入状态何如 -> 需要重新嵌入
+                elif old_is_valid == -1 and new_is_valid in [0, 1]:
+                    should_vector = True
+                    old_is_indexed_status = True
+                    update_dto.is_indexed = False
             
             # 2. 初始化is_indexed
             if "question" in update_dto.model_fields_set:
@@ -86,7 +117,10 @@ class InstructionDatumManager:
                     if new_question != old_question:
                         update_dto.is_indexed = False
                     else:
-                        update_dto.is_indexed = old_is_indexed_status
+                        if should_vector:
+                            update_dto.is_indexed = False
+                        else:
+                            update_dto.is_indexed = old_is_indexed_status
             
             # 3. 更新数据表
             success = await self.service.update(instruction_id, update_dto)
@@ -94,9 +128,24 @@ class InstructionDatumManager:
             
             # 4. 判断是否需要重新嵌入向量 
             if old_is_indexed_status and not update_dto.is_indexed:
-                self.logger.info("重新嵌入向量！")
-                pass
-                
+                # 4.1 获取需要更新的chunk
+                instruction_data: List[Dict[str, Any]] = await self.service.export_instructions_as_ingest_chunks(instruction_id=instruction_id)
+                question: str = update_dto.question or instruction_data[0]["text"]
+                metadata = instruction_data[0]["metadata"].copy()
+                target_metadata = update_dto.model_dump(exclude_unset=True)
+                new_metadata = metadata | target_metadata
+                item = {"text": question, "metadata": new_metadata}
+                chunks = [ChunkPayload(**item)]
+                # 4.2 获取嵌入模型配置
+                embed_config: EmbeddingConfigOverride = await self.llm_config_service.get_embedding_config_override(db_result.doc_id)
+                # 4.2 重新嵌入向量 
+                ingest_request = IngestRequest(
+                    chunks=chunks,
+                    embed_config=embed_config
+                )
+                count: int = await self.qdrant_service.ingest_api(ingest_request)
+                update_dto.is_indexed = True
+                success: bool = await self.service.update(instruction_id, update_dto)
             return success
         except Exception as e:
             raise ValueError(f"更新指令数据{instruction_id}失败！{str(e)}") from e
@@ -122,9 +171,40 @@ class InstructionDatumManager:
                 return 0
 
             # 3. 批量删除向量 (Vector)
-            # await self.qdrant_service.delete_vectors(ids=instruction_ids)
+            # 3.1 获取collection_name 根据 doc_id
+            for doc_id in affected_doc_ids:
+                collection_name = await self.llm_config_service.get_collection_name_by_doc_id(doc_id)
+                # 3.2 构建删除参数
+                vector_delete_req = VectorDeleteRequest(
+                    collection_name=collection_name,
+                    filters={
+                        "chunk_id": instruction_ids,
+                    }
+                )
+                vec_del_count = await self.qdrant_service.delete_vector(vector_delete_req)
 
-            # 4. 批量检查 Task 状态回滚
+            # -------------------------------------------------------------------------------------------
+            # 4. 如果指令数据为空了，需要重置嵌入步骤状态为PENDING，因为指令数据为待处理状态，后续的步骤必须等待-开始
+            count_map = await self.service.get_counts_by_doc_ids(affected_doc_ids)
+            for doc_id in affected_doc_ids:
+                if count_map.get(doc_id) == 0:
+                    # 4.1 更新状态
+                    task = await self.pipeline_task_service.get_specific_task_by_doc_id(
+                        doc_id, 
+                        TaskType.QDRANT_INDEX.value
+                    )
+                    if task and task.status != TaskLifecycle.PENDING.value:
+                        await self.pipeline_task_service.update(
+                            task.id,
+                            PipelineTaskUpdateDTO(
+                                status=TaskLifecycle.PENDING.value,
+                                detailed_status=IndexStatus.PENDING.value
+                            )
+                        )
+            # -------------------------------------------------------------------------------------------
+            # 4. 如果指令数据为空了，需要重置嵌入步骤状态为PENDING，因为指令数据为待处理状态，后续的步骤必须等待-结束
+            
+            # 5. 批量检查 Task 状态回滚
             if affected_doc_ids:
                 counts_map = await self.service.get_counts_by_doc_ids(list(affected_doc_ids))
                 
@@ -220,6 +300,33 @@ class InstructionDatumManager:
                 raise ValueError(f"[PipelineTask]重置任务状态失败！-{task_db_data.id}-")
             
             # 3. 删除向量数据库
+            # 3.1 获取collection_name 根据 doc_id
+            collection_name = await self.llm_config_service.get_collection_name_by_doc_id(doc_id)
+            # 3.2 构建删除参数
+            vector_delete_req = VectorDeleteRequest(
+                collection_name=collection_name,
+                filters={
+                    "doc_kb_id": doc_id,
+                    "type": "instruction"
+                }
+            )
+            vec_del_count = await self.qdrant_service.delete_vector(vector_delete_req)
+            
+            # -----------------------------------------------------------------------
+            # 4. 重置后续嵌入步骤状态开始
+            task = await self.pipeline_task_service.get_specific_task_by_doc_id(
+                doc_id, 
+                TaskType.QDRANT_INDEX.value
+            )
+            await self.pipeline_task_service.update(
+                task.id,
+                PipelineTaskUpdateDTO(
+                    status=TaskLifecycle.PENDING.value,
+                    detailed_status=IndexStatus.PENDING.value
+                )
+            )
+            # 4. 重置后续嵌入步骤状态结束
+            # -----------------------------------------------------------------------
             return task_update_status
         except Exception as e:
             raise ValueError(f"清空doc_id指令数据！{doc_id} \n{str(e)}") from e

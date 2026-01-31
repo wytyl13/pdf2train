@@ -6,7 +6,7 @@
 @File    : knowledge_base.py
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 
@@ -29,8 +29,15 @@ class KnowledgeBase(Base):
     avatar_url = Column(String(255), nullable=True, comment="封面图标")
 
     # === 2. 基础设施配置 (Hard Configs) ===
-    embedding_model = Column(String(50), default="bge-large-zh", nullable=False, comment="向量模型名称(不可随意更改)")
-    vector_store_collection_name = Column(String(100), nullable=True, comment="Qdrant集合逻辑标识")
+    # embedding_model = Column(String(50), default="bge-large-zh", nullable=False, comment="向量模型名称(不可随意更改)")
+    # vector_store_collection_name = Column(String(100), nullable=True, comment="Qdrant集合逻辑标识")
+    embedding_model_id = Column(
+        Integer, 
+        ForeignKey("sys_llm_configs.id"), 
+        nullable=False, 
+        index=True, 
+        comment="关联的Embedding配置ID"
+    )
 
     # === 3. 运行时策略配置 (Soft Configs) ===
     # 数据库存的是 JSON: {"top_k": 5, "mode": "hybrid", ...}
@@ -82,5 +89,5 @@ class KnowledgeBase(Base):
             self.a_settings = None
 
     def __repr__(self):
-        return f"<KnowledgeBase(id={self.id}, name='{self.name}', model='{self.embedding_model}')>"
+        return f"<KnowledgeBase(id={self.id}, name='{self.name}', embed_id={self.embedding_model_id})>"
     

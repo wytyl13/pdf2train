@@ -10,7 +10,13 @@ from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_t
 import logging
 from typing import List, Dict
 
-from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO, IngestRequest
+from pdf2train.core.schema.qdrant_dto import (
+    QdrantPayloadUpdateDTO, 
+    IngestRequest, 
+    VectorDeleteRequest
+)
+from pdf2train.core.schema.qdrant_dto import VectorDeleteRequest
+from pdf2train.core.service.llm_config_service import LLMConfigService
 
 
 WANGENG_VECTOR_URL = "http://wangeng:9040/api/vector/ingest"
@@ -19,8 +25,12 @@ WANGENG_QDRANT_UPDATE_METADATA_URL = "http://wangeng:9040/api/vector/update_meta
 
 
 class QdrantService:
-    def __init__(self):
+    def __init__(
+        self,
+        llm_config_service: LLMConfigService
+    ):
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.llm_config_service = llm_config_service
     
     @retry(
         stop=stop_after_attempt(3), 
@@ -50,6 +60,44 @@ class QdrantService:
                 raise Exception(f"API 业务错误: {resp_data}")
         return len(payload_chunks)
     
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_fixed(2),
+        retry=retry_if_exception_type(httpx.HTTPError) # 只重试网络错误
+    )
+    async def delete_vector(
+        self, 
+        vector_delete_request: VectorDeleteRequest
+    ) -> int:
+        """
+        条件删除向量数据
+        """
+        try:
+            collection_name = vector_delete_request.collection_name
+            filter_key = vector_delete_request.filter_key
+            filter_value = vector_delete_request.filter_value
+            filters = vector_delete_request.filters
+
+            timeout_settings = httpx.Timeout(60.0, connect=10.0) # 设置合理的超时
+            async with httpx.AsyncClient(timeout=timeout_settings) as client:
+                response = await client.post(
+                    WANGENG_VECTOR_DELETE_URL,
+                    json={
+                        "collection_name": collection_name,
+                        "filter_key": filter_key,
+                        "filter_value": filter_value,
+                        "filters": filters
+                    },
+                )
+                response.raise_for_status() # 如果 4xx/5xx 直接抛出异常触发重试
+                
+                resp_data = response.json()
+                is_success = resp_data.get("success") or (resp_data.get("status") == "success")
+                if not is_success:
+                    raise Exception(f"API 业务错误: {resp_data}")
+            return is_success
+        except Exception as e:
+            raise ValueError(f"条件删除向量数据失败！{str(e)}") from e
     
     @retry(
         stop=stop_after_attempt(3), 

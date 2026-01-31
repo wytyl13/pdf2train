@@ -16,7 +16,7 @@ class KBCreateReq(BaseModel):
     name: str = Field(..., description="知识库名称", max_length=100)
     description: Optional[str] = Field(None, description="知识库描述")
     avatar_url: Optional[str] = Field(None, description="知识库头像URL")
-    embedding_model: str = Field(default="bge-large-zh", description="向量模型名称")
+    embedding_model_id: Optional[int] = Field(None, description="向量模型id")
     user_id: int = Field(..., description="创建者用户ID")
     a_settings: Optional[RetrievalSettings] = Field(default_factory=RetrievalSettings)
     is_public: bool = Field(default=False, description="是否公开")
@@ -25,11 +25,11 @@ class KBUpdateReq(BaseModel):
     """更新知识库请求"""
     id: int = Field(..., description="知识库ID")
     name: Optional[str] = Field(None, description="知识库名称")
+    embedding_model_id: Optional[int] # 通常不允许更新 (会导致向量不一致)
     description: Optional[str] = None
     avatar_url: Optional[str] = None
     a_settings: Optional[RetrievalSettings] = None
     is_public: Optional[bool] = None
-    # embedding_model 通常不允许更新 (会导致向量不一致)
     
 class KBDeleteReq(BaseModel):
     """删除知识库请求"""

@@ -10,6 +10,31 @@ from pydantic import BaseModel, Field, root_validator
 from typing import List, Dict, Any, Optional, Union
 
 
+class VectorDeleteRequest(BaseModel):
+    """
+    向量删除请求参数 (升级版)
+    支持 单条件 (filter_key + filter_value) 或 多条件 (filters)
+    """
+    collection_name: str
+    
+    # === 兼容旧模式 (单条件) ===
+    filter_key: Optional[str] = None
+    filter_value: Optional[Union[int, str, List[int], List[str]]] = None
+    
+    # === 新增：多条件模式 ===
+    # 例如: {"doc_kb_id": 19, "type": "instruction"}
+    filters: Optional[Dict[str, Union[int, str, List[int], List[str]]]] = None
+    
+    @root_validator(pre=True)
+    def check_filters(cls, values):
+        # 校验：要么传 key+value，要么传 filters，不能什么都不传
+        key, val = values.get('filter_key'), values.get('filter_value')
+        filters = values.get('filters')
+        
+        if not (key and val) and not filters:
+            raise ValueError("必须提供 filter_key/filter_value 或 filters 其中之一")
+        return values
+
 class QdrantPayloadUpdateDTO(BaseModel):
     """
     更新向量元数据的请求参数

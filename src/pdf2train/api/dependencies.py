@@ -78,8 +78,10 @@ def get_knowledge_base_service(
 ):
     return KnowledgeBaseService(sql_config)
 
-def get_qdrant_service():
-    return QdrantService()
+def get_qdrant_service(
+    llm_config_service: Optional[LLMConfigService] = Depends(get_llm_config_service)
+):
+    return QdrantService(llm_config_service=llm_config_service)
 
 def get_pipeline_task_service(
     sql_config: Optional[SqlConfig] = Depends(get_sql_config)
@@ -181,24 +183,32 @@ def get_document_chunk_manager(
     document_chunk_service: Optional[DocumentChunkService] = Depends(get_document_chunk_service),
     pipeline_task_service: Optional[PipelineTaskService] = Depends(get_pipeline_task_service),
     pdf_document_service: Optional[PdfDocumentService] = Depends(get_pdf_service),
+    qdrant_service: Optional[QdrantService] = Depends(get_qdrant_service),
+    llm_config_service: Optional[LLMConfigService] = Depends(get_llm_config_service),
 ):
     return DocumentChunkManager(
         document_chunk_service=document_chunk_service,
         pipeline_task_service=pipeline_task_service,
-        pdf_document_service=pdf_document_service
+        pdf_document_service=pdf_document_service,
+        qdrant_service=qdrant_service,
+        llm_config_service=llm_config_service
     )
     
 def get_instruction_datum_manager(
     instruction_datum_service: PdfDocumentService = Depends(get_instruction_datum_service),
     document_chunk_service: DocumentChunkService = Depends(get_document_chunk_service),
     pdf_document_service: PdfDocumentService = Depends(get_pdf_service),
-    pipeline_task_service: PipelineTaskService = Depends(get_pipeline_task_service)
+    pipeline_task_service: PipelineTaskService = Depends(get_pipeline_task_service),
+    llm_config_service: Optional[LLMConfigService] = Depends(get_llm_config_service),
+    qdrant_service: Optional[QdrantService] = Depends(get_qdrant_service)
 ):
     return InstructionDatumManager(
         instruction_datum_service=instruction_datum_service,
         document_chunk_service=document_chunk_service,
         pdf_document_service=pdf_document_service,
-        pipeline_task_service=pipeline_task_service
+        pipeline_task_service=pipeline_task_service,
+        llm_config_service=llm_config_service,
+        qdrant_service=qdrant_service
     )
     
 def get_chunk_manager(

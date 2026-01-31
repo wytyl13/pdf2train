@@ -30,7 +30,7 @@ from pdf2train.api.service.base.document_chunk_service import DocumentChunkServi
 from pdf2train.api.service.base.instruction_datum_service import InstructionDatumService
 from pdf2train.api.service.base.pipeline_task_service import PipelineTaskService
 from pdf2train.core.table.pipeline_task import InstructionStatus, TaskLifecycle, InstructionTaskResult, TaskType
-from pdf2train.api.service.base.llm_config_service import LLMConfigService
+from pdf2train.core.service.llm_config_service import LLMConfigService
 
 from pdf2train.tool.h1_context_assembler import H1ContextAssembler
 from pdf2train.tool.instruction_llm_generator import InstructionLLMGenerator
@@ -266,7 +266,7 @@ class InstructionGenService:
         
         
         # 7. 构造并更新成功状态
-        config = await self.llm_config_service.get_config_by_doc_id(doc_id=doc_id, field_llm_name='instruction_gen_llm_config')
+        config = await self.llm_config_service.get_config_by_doc_id(doc_id=doc_id, field_llm_id_name='instruction_gen_llm_config_id')
         task_result = InstructionTaskResult(
             total_count=len(all_generated_results),
             total_tokens=total_tokens,

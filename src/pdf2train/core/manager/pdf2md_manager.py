@@ -126,7 +126,7 @@ class Pdf2MdManager:
             # 获取 MinIO Base URL (用于图片链接拼接)
             minio_base = core_config.minio_config.minio_public_url # 假设 Config 能取到，或者通过 MinioService 取
             if not minio_base.startswith("http"): minio_base = f"http://{minio_base}"
-            llm_config_obj: LLMConfig = await self.llm_config_service.get_config_by_doc_id(doc_id, field_llm_name="h_title_llm_config")
+            llm_config_obj: LLMConfig = await self.llm_config_service.get_config_by_doc_id(doc_id, field_llm_id_name="h_title_llm_config_id")
             # 2. 将 ORM 对象转换为字典
             llm_config_dict = None
             if llm_config_obj:

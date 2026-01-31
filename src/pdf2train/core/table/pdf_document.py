@@ -75,9 +75,33 @@ class PdfDocument(Base):
     
     kb_id = Column(Integer, ForeignKey("knowledge_base.id"), nullable=True, index=True, comment='所属知识库ID')
     process_error = Column(Text, nullable=True, comment='全局错误摘要')
-    instruction_gen_llm_config = Column(String(100), nullable=True, comment='指令生成使用的LLM配置名称')
-    h_title_llm_config = Column(String(100), nullable=True, comment='多级标题处理使用的LLM配置名称')
-    embedding_llm_config = Column(String(100), nullable=True, comment='语义嵌入LLM配置名称')
+    # instruction_gen_llm_config = Column(String(100), nullable=True, comment='指令生成使用的LLM配置名称')
+    # h_title_llm_config = Column(String(100), nullable=True, comment='多级标题处理使用的LLM配置名称')
+    # embedding_llm_config = Column(String(100), nullable=True, comment='语义嵌入LLM配置名称')
+
+    instruction_gen_llm_config_id = Column(
+        Integer, 
+        ForeignKey("sys_llm_configs.id"), # 关联配置表
+        nullable=True, 
+        comment='指令生成使用的LLM配置ID'
+    )
+
+    # 2. 多级标题处理 LLM
+    h_title_llm_config_id = Column(
+        Integer, 
+        ForeignKey("sys_llm_configs.id"), 
+        nullable=True, 
+        comment='多级标题处理使用的LLM配置ID'
+    )
+
+    # 3. 语义嵌入 LLM (注意：通常文档跟随知识库的配置，如果必须独立指定则保留)
+    embedding_llm_config_id = Column(
+        Integer, 
+        ForeignKey("sys_llm_configs.id"), 
+        nullable=True, 
+        comment='语义嵌入LLM配置ID'
+    )
+
     # === 审计 ===
     user_name = Column(String(64), nullable=False, comment='上传人')
     create_time = Column(DateTime(timezone=True), server_default=func.now(), comment='上传时间')
@@ -93,7 +117,9 @@ class PdfDocument(Base):
         cascade="all, delete-orphan",
     )
     knowledge_base = relationship("KnowledgeBase", back_populates="documents")
-    
+    instruction_gen_config = relationship("LLMConfig", foreign_keys=[instruction_gen_llm_config_id])
+    h_title_config = relationship("LLMConfig", foreign_keys=[h_title_llm_config_id])
+    embedding_config = relationship("LLMConfig", foreign_keys=[embedding_llm_config_id])
     
     @property
     def cover(self) -> Optional[CoverInfo]:

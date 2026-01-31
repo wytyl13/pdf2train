@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from typing import Dict, Union
 from io import StringIO
 
+from pdf2train.core.table.pdf_document import PdfDocument
 from pdf2train.api.schema.pdf_document_schema import (
     PdfDocCreateReq, PdfDocUpdateReq, DocListReq, PdfDocContentSaveReq,
     PaginatedDocRes, PdfDocDeleteReq, UnassignedReq,
@@ -37,25 +38,31 @@ async def upload_document(
     上传文档
     """
     try:
-        doc = await manager.upload_and_create(
+        doc: PdfDocument = await manager.upload_and_create(
             file=file,
             kb_id=meta.kb_id
         )
-        if any([meta.author, meta.original_title, meta.summary, meta.instruction_gen_llm_config]):
+        print("======================================================")
+        print(doc.h_title_llm_config_id)
+        print(doc.instruction_gen_llm_config_id)
+        print(doc.embedding_llm_config_id)
+        print("======================================================")
+        if any([meta.author, meta.original_title, meta.summary, meta.instruction_gen_llm_config_id]):
             update_dto = PdfDocUpdateDTO(
                 author=meta.author,
                 original_title=meta.original_title,
                 summary=meta.summary,
-                instruction_gen_llm_config=getattr(meta, 'instruction_gen_llm_config', None),
-                h_title_llm_config=getattr(meta, 'h_title_llm_config', None),
-                embedding_llm_config=getattr(meta, 'embedding_llm_config', None)
+                instruction_gen_llm_config_id=getattr(meta, 'instruction_gen_llm_config_id', None),
+                h_title_llm_config_id=getattr(meta, 'h_title_llm_config_id', None),
+                embedding_llm_config_id=getattr(meta, 'embedding_llm_config_id', None)
             )
             # 这里的 doc 是 upload_and_create 返回的完整对象或字典，取 id 进行更新
             doc_id = doc.id if hasattr(doc, 'id') else doc['id']
             await manager.update(doc_id, update_dto)
         return make_response(True, "上传成功！", doc)
     except Exception as e:
-        return make_response(False, f"上传失败！\n {str(e)}", code=500)
+        import traceback
+        return make_response(False, f"上传失败！\n {str(e)} \n {traceback.format_exc()}", code=500)
     
 @router.post("/list", response_model=dict)
 async def list_docs(

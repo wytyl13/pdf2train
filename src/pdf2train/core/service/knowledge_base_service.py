@@ -33,7 +33,7 @@ class KnowledgeBaseService:
 
     async def create(self, dto: KnowledgeBaseCoreDTO) -> int:
         """[DB] 创建记录"""
-        return await self.sql_provider.add_record(dto.model_dump())
+        return await self.sql_provider.add_record(dto.model_dump(exclude={'id'}))
     
     async def update(self, kb_id: int, dto: KnowledgeBaseUpdateDTO) -> bool:
         """[DB] 更新记录"""

@@ -37,13 +37,12 @@ class PdfDocCoreDTO(BaseModel):
     progress: int = 0
     kb_id: Optional[int] = None
     process_error: Optional[str] = None
-    instruction_gen_llm_config: Optional[str] = None
-    h_title_llm_config: Optional[str] = None
-    embedding_llm_config: Optional[str] = None
+    instruction_gen_llm_config_id: int
+    h_title_llm_config_id: int
+    embedding_llm_config_id: int
     user_name: str
     create_time: Optional[datetime] = datetime.now()
     update_time: Optional[datetime] = None
-    model_config = ConfigDict(from_attributes=True)
     
 
 class PdfDocRichDTO(PdfDocCoreDTO):
@@ -59,6 +58,9 @@ class PdfDocRichDTO(PdfDocCoreDTO):
     # 前端专用显示字段
     chunks_count: Optional[int] = None
     instruction_count: Optional[int] = None
+    instruction_gen_llm_config: str
+    h_title_llm_config: str
+    embedding_llm_config: str
 
 
 class PdfDocUpdateDTO(BaseModel):
@@ -78,9 +80,9 @@ class PdfDocUpdateDTO(BaseModel):
     original_title: Optional[str] = None
     cover_info: Optional[CoverInfoDTO] = None
     kb_id: Optional[int] = None
-    instruction_gen_llm_config: Optional[str] = None
-    h_title_llm_config: Optional[str] = None
-    embedding_llm_config: Optional[str] = None
+    instruction_gen_llm_config_id: Optional[int] = None
+    h_title_llm_config_id: Optional[int] = None
+    embedding_llm_config_id: Optional[int] = None
     
 
 class PdfDocFilterDTO(BaseModel):

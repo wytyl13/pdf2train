@@ -135,9 +135,9 @@ class QdrantManager:
         """向量化任务执行"""
         try:
             assert task_id is not None
-            # 1. 准备数据
-            chunks = await self.document_chunk_service.export_chunks_as_ingest_chunks(doc_id)
-            instructions = await self.instruction_datum_service.export_instructions_as_ingest_chunks(doc_id)
+            # 1. 准备数据，仅嵌入索引状态为false的
+            chunks = await self.document_chunk_service.export_chunks_as_ingest_chunks(doc_id, True)
+            instructions = await self.instruction_datum_service.export_instructions_as_ingest_chunks(doc_id, True)
             all_data = chunks + instructions
             total_count = len(all_data)
 

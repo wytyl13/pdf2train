@@ -27,7 +27,7 @@ class PageResult(BaseModel, Generic[T]):
         # 自动转换列表中的每一项
         # 前提：target_type (如 ChunkItemRes) 必须开启 from_attributes=True
         new_items = [target_type.model_validate(item) for item in self.items]
-        
+        print(new_items)
         # 返回新的 PageResult 对象
         return PageResult[U](
             items=new_items,

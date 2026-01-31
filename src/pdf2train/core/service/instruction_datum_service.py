@@ -179,11 +179,17 @@ class InstructionDatumService:
             filters=[self.model.is_valid.in_([0, 1])]
         )
     
-    async def export_instructions_as_ingest_chunks(self, doc_id: int) -> List[Dict[str, Any]]:
+    async def export_instructions_as_ingest_chunks(
+        self, 
+        doc_id: Optional[int] = None,
+        only_unindexed: bool = False,
+        instruction_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         将指令数据导出为待入库的 Chunk 格式
         """
         ingest_chunks = []
+        if not doc_id and not instruction_id: raise ValueError("doc_id and isntruction_id must not be null!")
         async with self.sql_provider.get_db_session() as session:
             # 1. 获取文件名
             stmt_doc = select(PdfDocument.file_name).where(PdfDocument.id == doc_id)
@@ -191,10 +197,14 @@ class InstructionDatumService:
             file_name = result_doc.scalar() or "Generated_Instruction"
 
             # 2. 获取该文档下所有【有效】的指令数据
-            stmt_inst = select(InstructionDatum).where(
-                InstructionDatum.doc_id == doc_id,
-                or_(InstructionDatum.is_valid != -1, InstructionDatum.is_valid.is_(None))
-            )
+            # 2.1 基础条件：指定文档 + 数据有效
+            filters = [or_(InstructionDatum.is_valid != -1, InstructionDatum.is_valid.is_(None))]
+            if doc_id: filters.append(InstructionDatum.doc_id == doc_id)
+            # 2.2 可选条件：如果 only_unindexed 为 True，则追加过滤条件
+            if only_unindexed: filters.append(InstructionDatum.is_indexed == False)
+            # 2.3 可选条件
+            if instruction_id: filters.append(InstructionDatum.id == instruction_id)
+            stmt_inst = select(InstructionDatum).where(*filters)
             result_inst = await session.execute(stmt_inst)
             all_instructions = result_inst.scalars().all()
 
@@ -211,7 +221,8 @@ class InstructionDatumService:
             chunk_map = {}
             if all_ref_ids:
                 stmt_chunk = select(DocumentChunk.id, DocumentChunk.content).where(
-                    DocumentChunk.document_id == doc_id
+                    DocumentChunk.document_id == doc_id,
+                    DocumentChunk.id.in_(all_ref_ids)
                 )
                 result_chunk = await session.execute(stmt_chunk)
                 

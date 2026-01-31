@@ -30,6 +30,7 @@ from pdf2train.core.service.document_chunk_service import DocumentChunkService
 from pdf2train.core.service.instruction_datum_service import InstructionDatumService
 from pdf2train.core.service.pipeline_task_service import PipelineTaskService
 from pdf2train.core.schema.base_schema import PageResult
+from pdf2train.core.schema.qdrant_dto import VectorDeleteRequest
 
 from pdf2train.core.table.llm_enum import ModelType
 from pdf2train.core.config import core_config
@@ -84,8 +85,21 @@ class PdfDocumentManager:
         doc_ids = [doc.id for doc in docs]
         # 1. 提取所有需要查询的 KB ID
         # 注意：这里假设 doc 是 ORM 对象，直接访问属性
-        kb_ids_to_query = {doc.kb_id for doc in docs if doc.kb_id}
-
+        kb_ids_to_query = set()
+        llm_config_ids_to_query = set() # 🔥 新增：用于收集配置 ID
+        for doc in docs:
+            # 收集 KB ID
+            if doc.kb_id:
+                kb_ids_to_query.add(doc.kb_id)
+            
+            # 🔥 收集 3 个配置 ID (去重)
+            if doc.instruction_gen_llm_config_id:
+                llm_config_ids_to_query.add(doc.instruction_gen_llm_config_id)
+            if doc.h_title_llm_config_id:
+                llm_config_ids_to_query.add(doc.h_title_llm_config_id)
+            if doc.embedding_llm_config_id:
+                llm_config_ids_to_query.add(doc.embedding_llm_config_id)
+                
         # 2. 并行执行所有 IO 密集型任务
         # 任务 A: 批量获取 KB 名称
         task_kb = self.kb_service.get_names_by_ids(list(kb_ids_to_query)) if kb_ids_to_query else asyncio.sleep(0, result={})
@@ -99,12 +113,16 @@ class PdfDocumentManager:
         # 任务 D: 获取默认 Embedding 配置
         task_config = self.llm_config_service.get_active_config_name(model_type=ModelType.EMBEDDING.value)
 
+        # 任务E：获取model_name mapping
+        task_model_name_map = self.llm_config_service.get_names_by_ids(list(llm_config_ids_to_query)) if llm_config_ids_to_query else asyncio.sleep(0, result={})
+
         # 并发执行并等待所有结果
         results = await asyncio.gather(
             task_kb, 
             task_chunk_counts, 
             task_instr_counts, 
             task_config, 
+            task_model_name_map,
             return_exceptions=True # 防止某个任务报错导致整体崩溃
         )
 
@@ -115,6 +133,7 @@ class PdfDocumentManager:
         instr_count_map = results[2] if not isinstance(results[2], Exception) else {}
         
         default_embedding = results[3]
+        model_name_map = results[4]
         if isinstance(default_embedding, Exception):
             self.logger.warning(f"获取默认Embedding配置失败: {default_embedding}")
             default_embedding = None
@@ -155,9 +174,9 @@ class PdfDocumentManager:
             file_size_display = self._format_size(doc.file_size)
 
             # 补全 LLM 配置
-            if not core_data.get('embedding_llm_config'):
-                # core_data和PdfDocRichDTO重复字段这里处理
-                core_data['embedding_llm_config'] = default_embedding
+            # if not core_data.get('embedding_llm_config'):
+            #     # core_data和PdfDocRichDTO重复字段这里处理
+            #     core_data['embedding_llm_config'] = default_embedding
 
             # C. 实例化 Rich DTO
             rich_dto = PdfDocRichDTO(
@@ -168,6 +187,9 @@ class PdfDocumentManager:
                 file_size_display=file_size_display,
                 chunks_count=chunk_count,
                 instruction_count=instruction_count,
+                instruction_gen_llm_config=model_name_map.get(core_data.get("instruction_gen_llm_config_id")),
+                h_title_llm_config=model_name_map.get(core_data.get("h_title_llm_config_id")),
+                embedding_llm_config=model_name_map.get(core_data.get("embedding_llm_config_id"))
             )
             
             result_list.append(rich_dto)
@@ -262,13 +284,12 @@ class PdfDocumentManager:
             page_count=int(meta_dict.get("pages", 0)),
             author=meta_dict.get("author"),
             original_title=meta_dict.get("original-title"),
-            instruction_gen_llm_config=await self.llm_config_service.get_active_config_name(model_type=ModelType.LLM.value),
-            h_title_llm_config=await self.llm_config_service.get_active_config_name(model_type=ModelType.LLM.value),
-            embedding_llm_config=await self.llm_config_service.get_active_config_name(model_type=ModelType.EMBEDDING.value),
+            instruction_gen_llm_config_id=await self.llm_config_service.get_active_config_id(model_type=ModelType.LLM.value),
+            h_title_llm_config_id=await self.llm_config_service.get_active_config_id(model_type=ModelType.LLM.value),
+            embedding_llm_config_id=await self.llm_config_service.get_active_config_id(model_type=ModelType.EMBEDDING.value),
             cover_info=cover_info,
             process_error=None,
         )
-
         # 6. 调用 Service 创建
         new_id = await self.pdf_service.create(doc_dto)
         
@@ -383,21 +404,16 @@ class PdfDocumentManager:
             # 6 删除第二步chunk生成的json
             
             # 7 删除嵌入向量
-            # collection_name = await self.update_doc_to_kb_service.get_collection_name_by_doc_id(doc_id=doc_id)
-            # if not collection_name:
-            #     self.logger.error(f"无法获取 doc_id={doc_id} 的 Collection Name，跳过向量删除")
-            # else:
-            #     try:
-            #         # 物理删除指令数据嵌入qdrant数据    
-            #         await self.update_doc_to_kb_service.delete_vector(
-            #             vector_delete_request=VectorDeleteRequest(
-            #                 collection_name=collection_name,
-            #                 filter_key="doc_kb_id",
-            #                 filter_value=doc_id
-            #             )
-            #         )
-            #     except Exception as ve:
-            #         self.logger.error(f"SQL已删，但向量删除失败: {ve}")
+            # 7.1 获取collection_name 根据 doc_id
+            collection_name = await self.llm_config_service.get_collection_name_by_doc_id(doc_id)
+            # 2.2 构建删除参数
+            vector_delete_req = VectorDeleteRequest(
+                collection_name=collection_name,
+                filters={
+                    "doc_kb_id": doc_id
+                }
+            )
+            vec_del_count = await self.qdrant_service.delete_vector(vector_delete_req)
         except Exception as e:
             import traceback
             print(f"Warning: Failed to delete file from MinIO: {str(e)} \n {traceback.format_exc()}")

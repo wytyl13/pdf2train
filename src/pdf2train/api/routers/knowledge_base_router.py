@@ -46,8 +46,7 @@ async def create_kb(
             name=req.name,
             description=req.description,
             avatar_url=req.avatar_url,
-            embedding_model=req.embedding_model,
-            vector_store_collection_name=req.embedding_model, 
+            embedding_model_id=req.embedding_model_id,
             user_id=req.user_id,
             a_settings=req.a_settings,
             is_public=req.is_public
@@ -142,10 +141,8 @@ async def update_docs_relation(
             return make_response(False, "目标知识库不存在", code=404)
         
         # 兼容字典或对象访问
-        collection_name = kb_info.get('embedding_model') if isinstance(kb_info, dict) else getattr(kb_info, 'embedding_model', None)
-        
-        if not collection_name:
-            return make_response(False, "知识库配置异常: 缺少向量模型信息", code=500)
+        collection_name = await manager.get_collection_name_by_kb_id(kb_info.get("id"))
+        if not collection_name: return make_response(False, "知识库配置异常: 缺少向量模型信息", code=500)
 
         # 2. 构造 QdrantPayloadUpdateDTO
         qdrant_dto = QdrantPayloadUpdateDTO(

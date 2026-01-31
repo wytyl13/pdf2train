@@ -14,6 +14,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.exc import OperationalError
 import sys
 from dotenv import load_dotenv, dotenv_values
+from typing import List
+
+
 from pdf2train.core.provider.sql_provider import SqlProvider
 from pdf2train.core.config import core_config
 from pdf2train.core.table.base import Base
@@ -69,6 +72,11 @@ async def check_and_upgrade_tables():
                 "pdf_document",
                 "file_hash",
                 "ALTER TABLE pdf_document ADD COLUMN file_hash VARCHAR(255) DEFAULT NULL"
+            ),
+            (
+                "knowledge_base",
+                "embedding_model_id",
+                "ALTER TABLE knowledge_base ADD COLUMN embedding_model_id INTEGER REFERENCES sys_llm_configs(id)"
             ),
             # 未来如果有其他新增字段，可以继续加在这里
         ]
@@ -184,7 +192,7 @@ async def create_tables_with_check(auto_choice: str = None):
             await create_all_tables()
             print("正在重新llm默认配置...")
             await init_default_data()
-            await init_knowledge_base_data()
+            # await init_knowledge_base_data()
 
     else:
         print("未检测到现有表，开始创建新表...")
@@ -195,6 +203,29 @@ async def init_knowledge_base_data():
     初始化默认知识库数据
     """
     print("正在初始化默认知识库 (通用农业知识库)...")
+
+    # 定义我们要引用的 Embedding 配置名称
+    target_embedding_name = "Aliyun-Embedding-V4"
+    embedding_config_id = None
+
+    # === 1. 先查询 Embedding 配置的 ID ===
+    llm_provider = None
+    try:
+        llm_provider = SqlProvider(model=LLMConfig)
+        # 查询数据库中是否存在该配置
+        configs: List[LLMConfig] = await llm_provider.get_record_by_condition({"name": target_embedding_name})
+        
+        if not configs:
+            print(f"❌ 错误：未找到名称为 [{target_embedding_name}] 的 Embedding 配置，无法创建默认知识库。")
+            return
+        
+        # 获取 ID (假设返回的是 ORM 对象列表)
+        embedding_config_id = configs[0].id
+        print(f"✅ 找到关联 Embedding 配置 ID: {embedding_config_id}")
+
+    except Exception as e:
+        print(f"❌ 查询 Embedding 配置失败: {e}")
+        return
 
     # 1. 构造 Pydantic 对象
     default_settings = RetrievalSettings(
@@ -214,7 +245,7 @@ async def init_knowledge_base_data():
         "name": "通用农业知识库",
         "description": "系统内置默认知识库",
         "avatar_url": "https://img.alicdn.com/imgextra/i4/O1CN01Z5PaLz1O7guX2l8j4_!!6000000001654-2-tps-200-200.png",
-        "embedding_model": "Aliyun-Embedding-V4", # 对应 LLMConfig Name
+        "embedding_model_id": embedding_config_id,
         "vector_store_collection_name": "global_agriculture_pool",
         "_settings": default_settings.model_dump(), 
         "user_id": 1, 

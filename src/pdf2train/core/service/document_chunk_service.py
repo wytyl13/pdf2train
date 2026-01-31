@@ -116,23 +116,36 @@ class DocumentChunkService:
         # Using Pydantic Schema to dump to dict
         return [DocumentChunkCoreDTO.model_validate(c).model_dump() for c in chunks]
     
-    async def export_chunks_as_ingest_chunks(self, doc_id: int) -> List[Dict[str, Any]]:
+    async def export_chunks_as_ingest_chunks(
+        self, 
+        doc_id: Optional[int] = None,
+        only_unindexed: bool = False,
+        chunk_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         [向量化专用] 将文档原始切片导出为标准入库格式
         用于和 Instruction 数据合并后一同入库
         """
-            
-        # 1. 查询该文档所有切片，document_chunk表格没有is_valid这个字段
-        stmt = text("""
-            SELECT * FROM document_chunks 
-            WHERE document_id = :doc_id 
-            ORDER BY chunk_index ASC
-        """)
-        async with self.sql_provider.get_db_session() as session:
-            result = await session.execute(stmt, {"doc_id": doc_id})
-            rows = result.fetchall()
-        
+        if not doc_id and not chunk_id:
+            raise ValueError("doc_id and chunk_id must not be null!")
         ingest_list = []
+        filters = [] 
+        # 1. 查询该文档所有切片，document_chunk表格没有is_valid这个字段
+        async with self.sql_provider.get_db_session() as session:
+            # 1.1 基础条件
+            if doc_id:
+                filters.append(DocumentChunk.document_id == doc_id)
+            # 1.2 动态追加条件：是否只查未索引的
+            if only_unindexed:
+                filters.append(DocumentChunk.is_indexed == False)
+            # 1.3 动态追加条件：指定 chunk_id
+            if chunk_id:
+                filters.append(DocumentChunk.id == chunk_id)
+            # 1.4 组装查询语句 (*filters 解包)
+            stmt = select(DocumentChunk).where(*filters).order_by(DocumentChunk.chunk_index.asc())
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+        
         for row in rows:
             # 2. 准备 Metadata
             # 将数据库里的 meta_info (通常包含 h1, h2 等) 作为基础
