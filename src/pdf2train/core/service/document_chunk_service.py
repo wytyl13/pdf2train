@@ -11,7 +11,7 @@
 import logging
 import json
 from typing import List, Optional, Tuple, AsyncGenerator, Dict, Any
-from sqlalchemy import text, select, desc, asc, func
+from sqlalchemy import text, select, desc, asc, func, update
 
 from pdf2train.core.provider.sql_provider import SqlProvider
 from pdf2train.core.configs.sql_config import SqlConfig
@@ -80,6 +80,22 @@ class DocumentChunkService:
             order_by=DocumentChunk.chunk_index.asc()
         )
 
+    async def update_indexed_status_batch(self, doc_ids: List[int], is_indexed: bool) -> int:
+        """
+        批量更新切片的索引状态
+        """
+        if not doc_ids:
+            return 0
+            
+        async with self.sql_provider.get_db_session() as session:
+            stmt = (
+                update(self.model)
+                .where(self.model.document_id.in_(doc_ids))
+                .values(is_indexed=is_indexed)
+            )
+            result = await session.execute(stmt)
+            return result.rowcount
+
     async def get_all_by_doc_id(self, doc_id: int) -> List[DocumentChunk]:
         """Get all chunks for export (Non-paginated)"""
         condition = {"document_id": doc_id}
@@ -89,7 +105,7 @@ class DocumentChunkService:
 
     async def get_counts_by_doc_ids(self, doc_ids: List[int]) -> Dict[int, int]:
         """
-        批量统计文档的 instruction 数量
+        批量统计文档的 chunks 数量
         """
         if not doc_ids:
             return {}
@@ -107,6 +123,23 @@ class DocumentChunkService:
             result = await session.execute(stmt)
             
             # 4. 转换结果为字典 {doc_id: count}
+            return dict(result.all())
+               
+    async def get_indexed_counts_by_doc_ids(self, doc_ids: List[int]) -> Dict[int, int]:
+        """
+        批量统计文档的 chunks 数量 (仅统计已索引/已嵌入 is_indexed=True 的数据)
+        """
+        if not doc_ids:
+            return {}
+
+        async with self.sql_provider.get_db_session() as session:
+            stmt = (
+                select(self.model.document_id, func.count(self.model.id))
+                .where(self.model.document_id.in_(doc_ids))
+                .where(self.model.is_indexed.is_(True)) 
+                .group_by(self.model.document_id)
+            )
+            result = await session.execute(stmt)
             return dict(result.all())
                 
     async def export_chunks_json(self, doc_id: int) -> List[Dict[str, Any]]:

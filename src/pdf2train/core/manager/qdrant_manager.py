@@ -13,7 +13,7 @@ from typing import Dict, Any, List
 from fastapi import BackgroundTasks
 from datetime import datetime
 
-from pdf2train.core.schema.qdrant_dto import EmbeddingTaskDTO, IngestBatchDTO, MetadataUpdateDTO
+from pdf2train.core.schema.qdrant_dto import EmbeddingTaskDTO, IngestBatchDTO, MetadataUpdateDTO, VectorDeleteRequest
 from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO
 from pdf2train.core.schema.qdrant_dto import IngestRequest, EmbeddingConfigOverride
 
@@ -114,6 +114,13 @@ class QdrantManager:
             # 2. 获取配置
             embedding_config: EmbeddingConfigOverride = await self.llm_config_service.get_embedding_config_override(doc_id=dto.doc_id)
 
+            if task_id is None:
+                task: PipelineTask = await self.pipeline_task_service.get_specific_task_by_doc_id(
+                    doc_id=dto.doc_id, 
+                    task_type_val=TaskType.QDRANT_INDEX.value
+                )
+                if not task: raise ValueError("Task未初始化")
+                task_id = task.id
             # 3. 异步执行
             background_tasks.add_task(
                 self._safe_run_embedding_logic,
@@ -243,6 +250,44 @@ class QdrantManager:
             return await self.pdf_document_service.update_kb_by_ids(dto.doc_ids, dto.kb_id)
         except Exception as e:
             self.logger.error(f"元数据更新失败: {e}")
+            raise e
+
+    async def delete_vectors(self, req: VectorDeleteRequest) -> bool:
+        """
+        [Manager层] 删除向量数据
+        
+        功能:
+        1. 自动补全 collection_name (如果缺失且 filter 是 doc_id)
+        2. 调用底层 Service 执行物理删除
+        """
+        try:
+            # 1. 自动补全 Collection Name
+            if not req.collection_name:
+                target_doc_id = None
+                
+                # 检查 filter_key 是否是文档相关
+                if req.filter_key in ["doc_id", "doc_kb_id"]:
+                    # 提取第一个 doc_id 用于查询配置
+                    if isinstance(req.filter_value, list) and req.filter_value:
+                        target_doc_id = req.filter_value[0]
+                    elif isinstance(req.filter_value, (int, str)):
+                        target_doc_id = req.filter_value
+                
+                if target_doc_id:
+                    model_name = await self.llm_config_service.get_collection_name_by_doc_id(target_doc_id)
+                    if model_name:
+                        req.collection_name = model_name
+            
+            # 2. 最终校验
+            if not req.collection_name:
+                raise ValueError("删除向量失败: 缺少 collection_name，且无法通过 doc_id 推断")
+
+            # 3. 调用 Service 执行删除
+            self.logger.info(f"正在删除向量: Collection={req.collection_name}, Filter={req.filter_key}={req.filter_value}")
+            return await self.qdrant_service.delete_vector(req)
+
+        except Exception as e:
+            self.logger.error(f"Manager 删除向量失败: {str(e)}")
             raise e
 
     async def ingest(self, dto: IngestBatchDTO) -> int:

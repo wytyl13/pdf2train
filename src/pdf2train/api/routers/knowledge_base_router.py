@@ -6,8 +6,8 @@
 @File    : knowledge_base_router.py
 """
 
-from fastapi import APIRouter, Depends
-from typing import Any
+from fastapi import APIRouter, Depends, BackgroundTasks
+from typing import Any, List
 
 from pdf2train.utils.response import make_response
 
@@ -18,17 +18,36 @@ from pdf2train.api.schema.knowledge_base_schema import (
     KBDeleteReq,
     KBListReq,
     KBDetailReq,
-    KBUpdateDocsReq
+    KBUpdateDocsReq,
+    RelationAction
 )
 
 # 2. 引入 Core DTO (业务契约)
 from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO
-from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO
+from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO, VectorDeleteRequest
 from pdf2train.core.schema.base_schema import PageResult
+
+from pdf2train.core.table.knowledge_base import KnowledgeBase
 
 # 3. 引入 Manager 和 Dependencies
 from pdf2train.core.manager.knowledge_base_manager import KnowledgeBaseManager
-from pdf2train.api.dependencies import get_knowledge_base_manager 
+from pdf2train.core.manager.pdf_document_manager import PdfDocumentManager
+from pdf2train.core.manager.document_chunk_manager import DocumentChunkManager
+from pdf2train.core.manager.instruction_datum_manager import InstructionDatumManager
+from pdf2train.core.manager.qdrant_manager import QdrantManager
+from pdf2train.core.manager.llm_config_manager import LLMConfigManager
+from pdf2train.api.dependencies import (
+    get_knowledge_base_manager, 
+    get_document_chunk_manager, 
+    get_pdf_manager,
+    get_instruction_datum_manager,
+    get_qdrant_manager,
+    get_llm_config_manager,
+    get_doc_relation_biz
+)
+from pdf2train.core.schema.qdrant_dto import EmbeddingTaskDTO
+from pdf2train.core.business.doc_relation_biz import DocRelationBiz, KBUpdateDocsReqDTO
+
 
 router = APIRouter(prefix="/api/knowledge_base", tags=["Knowledge Base"])
 
@@ -120,42 +139,36 @@ async def get_kb_detail(
 ):
     """获取知识库详情"""
     try:
-        data = await manager.get_kb_detail(req.id)
+        data: KnowledgeBase = await manager.get_kb_detail(req.id)
         return make_response(True, "查询成功", data) if data else make_response(False, "知识库不存在", code=404)
     except Exception as e:
         return make_response(False, f"查询失败: {str(e)}", code=500)
 
-
 @router.post("/update_docs")
 async def update_docs_relation(
     req: KBUpdateDocsReq,
-    manager: KnowledgeBaseManager = Depends(get_knowledge_base_manager)
+    background_tasks: BackgroundTasks,
+    biz: DocRelationBiz = Depends(get_doc_relation_biz)
 ):
     """
     将文档关联到知识库
     """
+    dto = KBUpdateDocsReqDTO(**req.model_dump(exclude_unset=True))
     try:
-        # 1. 获取目标知识库信息以拿到 collection_name
-        kb_info = await manager.get_kb_detail(req.kb_id)
-        if not kb_info:
-            return make_response(False, "目标知识库不存在", code=404)
-        
-        # 兼容字典或对象访问
-        collection_name = await manager.get_collection_name_by_kb_id(kb_info.get("id"))
-        if not collection_name: return make_response(False, "知识库配置异常: 缺少向量模型信息", code=500)
-
-        # 2. 构造 QdrantPayloadUpdateDTO
-        qdrant_dto = QdrantPayloadUpdateDTO(
-            collection_name=collection_name,
-            filter_key="doc_id",
-            filter_value=req.doc_ids,
-            payload={"kb_id": req.kb_id}
+        result = await biz.process_relation_update(req, background_tasks)
+        status = result.get("status")
+        if status == "CONFIRM_REQUIRED":
+            return make_response(
+                success=True, 
+                message=result["msg"], 
+                data=result["data"]
+            )
+            
+        return make_response(
+            success=True, 
+            message=result["msg"], 
+            data=result.get("data")
         )
-
-        # 3. 调用 Manager 执行批量更新
-        updated_count = await manager.update_docs_to_kb(qdrant_dto)
-        
-        return make_response(True, f"成功关联 {updated_count} 个文档", {"updated_count": updated_count})
-        
     except Exception as e:
-        return make_response(False, f"关联文档失败: {str(e)}", code=500)
+        return make_response(success=False, message=str(e), code=500)
+    

@@ -38,6 +38,7 @@ from pdf2train.core.manager.instruction_datum_manager import InstructionDatumMan
 from pdf2train.core.manager.chunk_manager import ChunkManager
 from pdf2train.core.manager.instruction_gen_manager import InstructionGenManager
 from pdf2train.core.manager.qdrant_manager import QdrantManager
+from pdf2train.core.business.doc_relation_biz import DocRelationBiz
 
 ROOT_DIRECTORY = Path(__file__).parent.parent.parent.parent
 ENV_PATH = str(ROOT_DIRECTORY / ".env")
@@ -156,9 +157,18 @@ def get_knowledge_base_manager(
     kb_service: KnowledgeBaseService = Depends(get_knowledge_base_service),
     pdf_service: PdfDocumentService = Depends(get_pdf_service),
     qdrant_service: QdrantService = Depends(get_qdrant_service),
-    llm_config_service: LLMConfigService = Depends(get_llm_config_service)
+    llm_config_service: LLMConfigService = Depends(get_llm_config_service),
+    document_chunk_service: DocumentChunkService = Depends(get_document_chunk_service),
+    instruction_datum_service: InstructionDatumService = Depends(get_instruction_datum_service),
 ) -> LLMConfigManager:
-    return KnowledgeBaseManager(kb_service, pdf_service, qdrant_service, llm_config_service)
+    return KnowledgeBaseManager(
+        kb_service, 
+        pdf_service, 
+        qdrant_service, 
+        llm_config_service,
+        document_chunk_service,
+        instruction_datum_service
+    )
 
 def get_pipeline_task_manager(
     pipeline_task_service: LLMConfigService = Depends(get_pipeline_task_service),
@@ -258,5 +268,19 @@ def get_qdrant_manager(
         instruction_datum_service=instruction_datum_service,
         llm_config_service=llm_config_service,
         qdrant_service=qdrant_service
+    )
+    
+async def get_doc_relation_biz(
+    kb_manager: KnowledgeBaseManager = Depends(get_knowledge_base_manager),
+    pdf_manager: PdfDocumentManager = Depends(get_pdf_manager),
+    qdrant_manager: QdrantManager = Depends(get_qdrant_manager)
+) -> DocRelationBiz:
+    """
+    在 API 层组装 Biz 对象，注入所需的 Managers
+    """
+    return DocRelationBiz(
+        kb_manager=kb_manager,
+        pdf_manager=pdf_manager,
+        qdrant_manager=qdrant_manager
     )
 

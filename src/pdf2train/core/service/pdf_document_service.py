@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional, Union, Tuple
 from pathlib import Path
 from dotenv import dotenv_values
-from sqlalchemy import select, func, and_, or_, text, update
+from sqlalchemy import select, func, and_, or_, text, update, exists
 
 from pdf2train.core.configs.sql_config import SqlConfig
 from pdf2train.core.provider.sql_provider import SqlProvider
@@ -105,6 +105,8 @@ class PdfDocumentService:
                     complex_filters.append(PdfDocument.kb_id.in_(filter_dto.kb_id))
                 else:
                     complex_filters.append(text("1=0"))
+            elif filter_dto.kb_id == -1:
+                complex_filters.append(PdfDocument.kb_id.is_(None))
             else:
                 complex_filters.append(PdfDocument.kb_id == filter_dto.kb_id)
 
@@ -146,6 +148,55 @@ class PdfDocumentService:
             order_by=PdfDocument.create_time.desc()
         )
 
+    async def update_embedding_config_batch(self, doc_ids: List[int], config_id: int) -> int:
+        """
+        [新增] 批量更新文档的 Embedding 配置 ID
+        """
+        if not doc_ids:
+            return 0
+            
+        async with self.sql_provider.get_db_session() as session:
+            stmt = (
+                update(self.model)
+                .where(self.model.id.in_(doc_ids))
+                .values(
+                    embedding_llm_config_id=config_id,
+                    update_time=datetime.now()
+                )
+            )
+            result = await session.execute(stmt)
+            return result.rowcount
+
+    async def get_by_ids(self, doc_ids: List[Union[int, str]], is_indexed: bool=False) -> List[PdfDocument]:
+        """
+        根据 ID 列表批量获取文档对象
+        :param doc_ids: 文档 ID 列表
+        :return: PdfDocument 对象列表
+        """
+        # 1. 空检查：如果传入空列表，直接返回空，避免无效数据库查询
+        if not doc_ids: return []
+        async with self.sql_provider.get_db_session() as session:
+            # 2. 构造查询：使用 in_ 查询
+            stmt = select(self.model).where(self.model.id.in_(doc_ids))
+            # 3. ✅ 动态追加过滤条件
+            if is_indexed:
+                # 子查询: 查找该文档是否存在 "成功的 QDRANT_INDEX 任务"
+                task_exists_stmt = exists(select(1).where(
+                    and_(
+                        PipelineTask.doc_id == self.model.id,
+                        # 任务类型必须是 向量化
+                        PipelineTask.task_type == TaskType.QDRANT_INDEX.value, 
+                        # 任务状态必须是 成功
+                        PipelineTask.status == TaskLifecycle.SUCCESS.value
+                    )
+                ))
+                stmt = stmt.where(task_exists_stmt)
+            # 3. 执行查询
+            result = await session.execute(stmt)
+            
+            # 4. 返回结果：scalars().all() 将结果转换为 ORM 对象列表
+            return list(result.scalars().all())
+                
     async def update_kb_by_ids(self, ids: List[int], new_kb_id: Optional[Union[int, None]] = None):
         stmt = (
             update(self.model)

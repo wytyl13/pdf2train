@@ -28,7 +28,7 @@ class KnowledgeBaseUpdateDTO(BaseModel):
     """更新知识库 DTO"""
     name: Optional[str] = None
     description: Optional[str] = None
-    embedding_model_id: Optional[int] = None
+    # embedding_model_id: Optional[int] = None # 一般不允许修改，如果想修改取消注解即可
     avatar_url: Optional[str] = None
     a_settings: Optional[RetrievalSettings] = None
     is_public: Optional[bool] = None

@@ -110,6 +110,38 @@ class DocumentChunkManager:
         except Exception as e:
             raise ValueError(f"单个chunk更新失败{str(e)}") from e
     
+    async def reset_indexed_status_by_doc_ids(self, doc_ids: List[int]) -> int:
+        """
+        批量重置指定文档的所有切片索引状态为 False
+        场景: 知识库嵌入模型变更，需要强制重新向量化
+        """
+        if not doc_ids:
+            return 0
+
+        try:
+            # 1. 数据库层面：批量将 is_indexed 设为 False
+            updated_count = await self.service.update_indexed_status_batch(doc_ids, is_indexed=False)
+            for doc_id in doc_ids:
+                # 获取该文档的 "向量化" 任务
+                task = await self.pipeline_task_service.get_specific_task_by_doc_id(
+                    doc_id, 
+                    TaskType.QDRANT_INDEX.value
+                )
+                if task:
+                    # 重置状态为 PENDING
+                    await self.pipeline_task_service.update(
+                        task.id,
+                        PipelineTaskUpdateDTO(
+                            status=TaskLifecycle.PENDING.value,
+                            detailed_status=IndexStatus.PENDING.value
+                        )
+                    )
+            
+            return updated_count
+            
+        except Exception as e:
+            raise ValueError(f"批量重置索引状态失败: {str(e)}") from e
+    
     async def get_indexed_status_by_chunk_id(
         self, 
         chunk_id: str, 

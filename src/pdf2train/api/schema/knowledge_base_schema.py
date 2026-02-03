@@ -5,7 +5,7 @@
 @Author  : weiyutao
 @File    : knowledge_base_schema.py
 """
-
+from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
@@ -25,7 +25,7 @@ class KBUpdateReq(BaseModel):
     """更新知识库请求"""
     id: int = Field(..., description="知识库ID")
     name: Optional[str] = Field(None, description="知识库名称")
-    embedding_model_id: Optional[int] # 通常不允许更新 (会导致向量不一致)
+    # embedding_model_id: Optional[int] # 通常不允许更新 (会导致向量不一致)，如果想修改取消注解即可
     description: Optional[str] = None
     avatar_url: Optional[str] = None
     a_settings: Optional[RetrievalSettings] = None
@@ -45,10 +45,16 @@ class KBDetailReq(BaseModel):
     """知识库详情请求"""
     id: int = Field(..., description="知识库ID")
 
+class RelationAction(str, Enum):
+    BIND = "bind"     # 关联
+    UNBIND = "unbind" # 解绑
+
 class KBUpdateDocsReq(BaseModel):
     """文档关联到知识库请求"""
     kb_id: Optional[int] = Field(default=None, description="知识库ID")
     doc_ids: List[int] = Field(..., description="文档ID列表")
+    action: RelationAction = Field(default=RelationAction.BIND, description="操作类型：bind=关联, unbind=解绑")
+    force: bool = Field(default=False, description="遇到模型不一致时，是否强制重置")
 
     
 

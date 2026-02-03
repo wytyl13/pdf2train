@@ -19,7 +19,8 @@ from datetime import datetime
 import asyncio
 
 from pdf2train.core.table.pdf_document import PdfDocument
-from pdf2train.core.table.pipeline_task import PipelineTask
+from pdf2train.core.table.pipeline_task import PipelineTask, TaskType, TaskLifecycle
+from pdf2train.core.schema.pipeline_task_dto import PipelineTaskUpdateDTO
 from pdf2train.core.schema.pdf_document_dto import PdfDocCoreDTO, PdfDocUpdateDTO, PdfDocFilterDTO, PdfDocRichDTO
 from pdf2train.utils.pdf_utils import PdfUtils
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
@@ -459,13 +460,13 @@ class PdfDocumentManager:
         try:
             # 1. 复用 get_document_list 获取全量数据
             # [修改点2] 将 kb_id 透传给 get_document_list
-            result = await self.get_list_documents(
+            result: PageResult[PdfDocRichDTO] = await self.get_list_documents(
                 page=None,
                 size=None,
                 filter_dto=filter_dto
             )
             
-            raw_items = result.get("items", [])
+            raw_items = result.items or []
             export_list = []
 
             # 2. 定义状态映射
@@ -593,11 +594,113 @@ class PdfDocumentManager:
             db_result: Dict[str, List[PdfDocument] | int] = await self.pdf_service.search_paginated(
                 page, size, 
                 # 构造一个特殊的 filter
-                PdfDocFilterDTO(kb_id=None, keyword=keyword) # 假设 None 代表查询 null
+                PdfDocFilterDTO(kb_id=-1, keyword=keyword) # 假设 None 代表查询 null
             )
             return PageResult[PdfDocCoreDTO](**db_result)
         except Exception as e:
             raise ValueError(f"获取未分配知识库文档失败！{str(r)}") from e
+
+    async def reset_embedding_llm_config_id(
+        self, 
+        doc_ids: List[int], 
+        embedding_llm_config_id: int,
+        kb_id: Optional[int] = None
+    ) -> bool:
+        """
+        批量修改文档的 Embedding 模型配置，并重置相关的向量化状态。
+        
+        流程:
+        1. 修改 pdf_document 表的 embedding_llm_config_id
+        2. 将关联 chunks 的 is_indexed 设为 False
+        3. 将 QDRANT_INDEX 任务重置为 PENDING (触发重新向量化)仅完成嵌入任务的状态需要重置
+        """
+        if not doc_ids:
+            return False
+
+        try:
+            # 1. 更新文档表中的配置 ID
+            await self.pdf_service.update_embedding_config_batch(doc_ids, embedding_llm_config_id)
+            
+            if kb_id is not None: await self.pdf_service.update_kb_by_ids(doc_ids, kb_id)
+            
+            # 2. 级联重置：将所有切片的索引状态设为 False
+            await self.document_chunk_service.update_indexed_status_batch(doc_ids, is_indexed=False)
+            await self.instruction_datum_service.update_indexed_status_batch(doc_ids, is_indexed=False)
+            
+            # 3. 任务重置：将向量化任务状态回滚，以便后台 Worker 重新扫描处理
+            for doc_id in doc_ids:
+                task = await self.pipeline_task_service.get_specific_task_by_doc_id(
+                    doc_id, 
+                    TaskType.QDRANT_INDEX.value # 确保引入了 TaskType
+                )
+                
+                if task:
+                    if task.status == TaskLifecycle.SUCCESS.value:
+                        # 仅已经完成嵌入的状态需要重置
+                        await self.pipeline_task_service.update(
+                            task.id,
+                            PipelineTaskUpdateDTO(
+                                status=TaskLifecycle.RUNNING.value,
+                                detailed_status=20, # IndexStatus.PENDING 的值，通常是 20 或根据你的枚举定义
+                                result_data=None    # 清空旧的执行结果
+                            )
+                        )
+            
+            self.logger.info(f"已重置 {len(doc_ids)} 个文档的 Embedding 配置为 {embedding_llm_config_id}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"重置 Embedding 配置失败: {str(e)}")
+            raise ValueError(f"重置 Embedding 配置失败: {str(e)}") from e
+
+    async def get_collection_names_by_doc_ids(self, doc_ids: List[int]) -> Dict[int, str]:
+        """
+        根据文档 ID 列表获取对应的 Collection Name (即 Model Name)
+        
+        流程:
+        1. 根据 doc_ids 查询 PdfDocument 表，获取 embedding_llm_config_id
+        2. 根据 config_id 查询 LLMConfig 表，获取 model_name
+        
+        返回:
+        {doc_id: collection_name} 的映射字典
+        """
+        if not doc_ids:
+            return {}
+
+        try:
+            # 1. 获取文档信息
+            docs: List[PdfDocument] = await self.pdf_service.get_by_ids(doc_ids)
+            if not docs:
+                return {}
+
+            # 2. 提取去重后的 config_ids
+            config_ids = list(set([d.embedding_llm_config_id for d in docs if d.embedding_llm_config_id]))
+            
+            if not config_ids:
+                return {}
+
+            # 3. 获取配置详情 (构建 config_id -> model_name 的映射)
+            config_map: Dict[int, str] = {}
+            for cid in config_ids:
+                # 调用 llm_config_service 获取配置
+                config = await self.llm_config_service.get_by_id(cid)
+                if config:
+                    config_map[cid] = config.model_name
+
+            # 4. 组装结果 {doc_id: model_name}
+            result = {}
+            for doc in docs:
+                # 只有当文档有配置ID，且该配置能查到模型名时才返回
+                if doc.embedding_llm_config_id and doc.embedding_llm_config_id in config_map:
+                    result[doc.id] = config_map[doc.embedding_llm_config_id]
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"获取文档集合名称失败: {str(e)}")
+            # 这里可以选择抛出异常或者返回空字典，视业务需求而定
+            # raise ValueError(f"获取文档集合名称失败: {str(e)}")
+            return {}
 
     async def get_markdown_content(self, doc_id: int) -> str:
         """

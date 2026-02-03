@@ -39,7 +39,7 @@ class KnowledgeBaseService:
         """[DB] 更新记录"""
         return await self.sql_provider.update_record(kb_id, dto.model_dump(exclude_unset=True))
     
-    async def get_by_id(self, kb_id: int) -> Dict[str, Any]:
+    async def get_by_id(self, kb_id: int) -> KnowledgeBase:
         """[DB] 获取单条记录"""
         results = await self.sql_provider.get_record_by_condition({"id": kb_id})
         return results[0] if results else None

@@ -151,6 +151,23 @@ class InstructionDatumService:
             
             # 4. 转换结果为字典 {doc_id: count}
             return dict(result.all())
+              
+    async def get_indexed_counts_by_doc_ids(self, doc_ids: List[int]) -> Dict[int, int]:
+        """
+        批量统计文档的 chunks 数量 (仅统计已索引/已嵌入 is_indexed=True 的数据)
+        """
+        if not doc_ids: return {}
+
+        async with self.sql_provider.get_db_session() as session:
+            stmt = (
+                select(self.model.doc_id, func.count(self.model.id))
+                .where(self.model.doc_id.in_(doc_ids))
+                .where(self.model.is_indexed.is_(True)) 
+                .group_by(self.model.doc_id)
+            )
+            
+            result = await session.execute(stmt)
+            return dict(result.all())
                 
     async def get_all_instruction_doc_ids(self) -> List[int]:
         """
@@ -270,6 +287,21 @@ class InstructionDatumService:
                 ingest_chunks.append(item)
         return ingest_chunks
 
+    async def update_indexed_status_batch(self, doc_ids: List[int], is_indexed: bool) -> int:
+        """
+        批量更新切片的索引状态
+        """
+        if not doc_ids:
+            return 0
+            
+        async with self.sql_provider.get_db_session() as session:
+            stmt = (
+                update(self.model)
+                .where(self.model.doc_id.in_(doc_ids))
+                .values(is_indexed=is_indexed)
+            )
+            result = await session.execute(stmt)
+            return result.rowcount
     
     async def search_paginated(
         self, 
