@@ -12,8 +12,9 @@ from sqlalchemy import select
 
 from pdf2train.core.configs.sql_config import SqlConfig
 from pdf2train.core.provider.sql_provider import SqlProvider
+from pdf2train.core.table.llm_config import LLMConfig
 from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO
-
+from pdf2train.core.schema.qdrant_dto import EmbeddingConfigOverride
 from pdf2train.core.table.knowledge_base import KnowledgeBase
 
 class KnowledgeBaseService:
@@ -38,6 +39,39 @@ class KnowledgeBaseService:
     async def update(self, kb_id: int, dto: KnowledgeBaseUpdateDTO) -> bool:
         """[DB] 更新记录"""
         return await self.sql_provider.update_record(kb_id, dto.model_dump(exclude_unset=True))
+    
+    async def get_embedding_config_override(self, kb_id: int) -> Optional[EmbeddingConfigOverride]:
+        """
+        [DB] 获取知识库对应的 Embedding 模型配置覆盖对象
+        
+        逻辑：
+        1. 根据 kb_id 在 KnowledgeBase 表找到 embedding_model_id
+        2. 根据 embedding_model_id 关联 LLMConfig 表
+        3. 提取 LLMConfig 中的 base_url, api_key, model_name
+        4. 组装成 EmbeddingConfigOverride 返回
+        """
+        async with self.sql_provider.get_db_session() as session:
+            stmt = (
+                select(
+                    LLMConfig.base_url,
+                    LLMConfig.api_key,
+                    LLMConfig.model_name
+                )
+                .join(self.model, self.model.embedding_model_id == LLMConfig.id)
+                .where(self.model.id == kb_id)
+            )
+            
+            result = await session.execute(stmt)
+            row = result.first()
+            if row:
+                return EmbeddingConfigOverride(
+                    base_url=row.base_url,
+                    api_key=row.api_key,
+                    model_name=row.model_name
+                )
+            
+            self.logger.warning(f"无法找到知识库(id={kb_id})对应的嵌入模型配置")
+            return None
     
     async def get_by_id(self, kb_id: int) -> KnowledgeBase:
         """[DB] 获取单条记录"""

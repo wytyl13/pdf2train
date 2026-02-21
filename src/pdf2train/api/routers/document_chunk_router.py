@@ -198,7 +198,7 @@ async def download_pretrain_by_kb(
     req: ChunkExportPretrainByKbReq,
     manager: DocumentChunkManager = Depends(get_document_chunk_manager)
 ):
-    generator = await manager.download_pretrain_stream_by_kb(req.kb_ids)
+    generator = manager.download_pretrain_stream_by_kb(req.kb_ids)
     
     filename = req.filename if req.filename.endswith(".jsonl") else f"{req.filename}.jsonl"
     encoded_filename = urllib.parse.quote(filename)

@@ -10,7 +10,7 @@ import logging
 from typing import Dict, Any, List, Optional
 
 # import dto
-from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO
+from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO, KnowledgeBaseCoreRichDTO
 from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO
 
 from pdf2train.core.table.knowledge_base import KnowledgeBase
@@ -20,6 +20,7 @@ from pdf2train.core.table.llm_config import LLMConfig
 from pdf2train.core.table.llm_enum import ModelType
 from pdf2train.api.schema.knowledge_base_schema import KBUpdateDocsReq
 from pdf2train.core.schema.base_schema import PageResult
+from pdf2train.core.schema.llm_config_dto import LLMConfigCoreDTO
 # import service
 from pdf2train.core.service.knowledge_base_service import KnowledgeBaseService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
@@ -27,8 +28,7 @@ from pdf2train.core.service.qdrant_service import QdrantService
 from pdf2train.core.service.llm_config_service import LLMConfigService
 from pdf2train.core.service.document_chunk_service import DocumentChunkService
 from pdf2train.core.service.instruction_datum_service import InstructionDatumService
-from pdf2train.core.schema.qdrant_dto import EmbeddingTaskDTO
-
+from pdf2train.core.schema.qdrant_dto import EmbeddingTaskDTO, EmbeddingConfigOverride
 
 
 class KnowledgeBaseManager:
@@ -92,9 +92,31 @@ class KnowledgeBaseManager:
         """更新知识库"""
         return await self.kb_service.update(kb_id, dto)
     
-    async def get_kb_detail(self, kb_id: int) -> KnowledgeBase:
-        """获取详情"""
+    async def get_kb(self, kb_id: int) -> KnowledgeBase:
         return await self.kb_service.get_by_id(kb_id)
+    
+    async def get_kb_detail(self, kb_id: int) -> KnowledgeBaseCoreRichDTO:
+        """获取详情"""
+        try:
+            data: KnowledgeBase = await self.get_kb(kb_id)
+            if data:
+                collection_name = await self.get_collection_name_by_kb_id(kb_id)
+                embedding_config_override = await self.get_embedding_config_override(kb_id)
+                rerank_llm_config: LLMConfig = await self.llm_config_service.find_by_name_or_model(data.a_settings["rerank"]["model_name"])
+                rerank_model_config: LLMConfigCoreDTO = LLMConfigCoreDTO.model_validate(rerank_llm_config)
+                result_data = KnowledgeBaseCoreRichDTO(
+                    id=data.id,
+                    embedding_model_id=data.embedding_model_id,
+                    a_settings=data.a_settings,
+                    rerank_model_config=rerank_model_config,
+                    collection_name=collection_name,
+                    embedding_config_override=embedding_config_override
+                )
+                return result_data
+            else:
+                raise ValueError("知识库不存在！")
+        except Exception as e:
+            raise ValueError(f"知识库查询失败！{str(e)}") from e
     
     async def get_collection_name_by_kb_id(self, kb_id: int) -> Dict[str, Any]:
         """
@@ -228,6 +250,13 @@ class KnowledgeBaseManager:
             error_msg = f"获取已索引文档失败: {str(e)}"
             # self.logger.error(error_msg) # 如果有 logger
             raise ValueError(error_msg) from e
+    
+    async def get_embedding_config_override(self, kb_id: int) -> Optional[EmbeddingConfigOverride]:
+        try:
+            return await self.kb_service.get_embedding_config_override(kb_id)
+        except Exception as e:
+            raise ValueError(f"获取嵌入模型配置失败！{str(e)}") from e
+        
     
     async def check_update_risk(self, doc_ids: List[str], embedding_model_id: int) -> dict:
         """

@@ -126,13 +126,30 @@ class Pdf2MdService:
             "img_prefix": minio_img_prefix
         }
 
+    def get_short_safe_name(self, filename, max_chars=50):
+        # 1. 分离文件名和后缀
+        # 例如: "非常长...的文档.pdf" -> name="非常长...的文档", ext=".pdf"
+        name, ext = os.path.splitext(filename)
+        
+        # 2. (可选但推荐) 清洗掉怪异字符，避免 S3 报错
+        # 把非中文、非英文、非数字的字符换成下划线
+        name = re.sub(r'[^\w\u4e00-\u9fa5\-]', '_', name)
+
+        # 3. 截取前 max_chars 个字符
+        # 比如截取前 50 个字。如果文件名本身短于 50，这行代码也不会报错
+        short_name = name[:max_chars]
+        
+        # 4. 拼回后缀
+        return f"{short_name}{ext}"
+
     def _sync_call_mineru_api(self, pdf_path, output_dir, is_ocr):
         filename = os.path.basename(pdf_path)
+        file_name = self.get_short_safe_name(filename)
         key_name = os.path.splitext(filename)[0]
         chunk_out_dir = os.path.join(output_dir, key_name)
         os.makedirs(chunk_out_dir, exist_ok=True)
 
-        files = {'files': (filename, open(pdf_path, 'rb'), 'application/pdf')}
+        files = {'files': (file_name, open(pdf_path, 'rb'), 'application/pdf')}
         data = {
             'parse_method': 'auto',
             'output_dir': "./output",

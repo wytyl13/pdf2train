@@ -53,7 +53,7 @@ class PipelineTaskManager:
 
             # 2. 刷新父文档状态
             for doc_id in affected_doc_ids:
-                await self._refresh_parent_doc_status(doc_id)
+                await self.service._refresh_parent_doc_status(doc_id)
                 self.logger.info(f"已同步刷新文档状态 DocID: {doc_id}")
             return len(affected_doc_ids)
         except Exception as e:

@@ -25,7 +25,7 @@ class KBUpdateReq(BaseModel):
     """更新知识库请求"""
     id: int = Field(..., description="知识库ID")
     name: Optional[str] = Field(None, description="知识库名称")
-    # embedding_model_id: Optional[int] # 通常不允许更新 (会导致向量不一致)，如果想修改取消注解即可
+    # embedding_model_id: Optional[int] # 通常不允许更新 (会导致向量不一致)，如果想修改
     description: Optional[str] = None
     avatar_url: Optional[str] = None
     a_settings: Optional[RetrievalSettings] = None
@@ -55,6 +55,5 @@ class KBUpdateDocsReq(BaseModel):
     doc_ids: List[int] = Field(..., description="文档ID列表")
     action: RelationAction = Field(default=RelationAction.BIND, description="操作类型：bind=关联, unbind=解绑")
     force: bool = Field(default=False, description="遇到模型不一致时，是否强制重置")
-
     
 

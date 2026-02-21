@@ -12,6 +12,7 @@ import logging
 import json
 from typing import List, Optional, Tuple, AsyncGenerator, Dict, Any
 from sqlalchemy import text, select, desc, asc, func, update
+import re
 
 from pdf2train.core.provider.sql_provider import SqlProvider
 from pdf2train.core.configs.sql_config import SqlConfig
@@ -206,8 +207,93 @@ class DocumentChunkService:
             }
             ingest_list.append(item)
         return ingest_list
-            
+          
+    def clean_agri_text(self, text: str) -> str:
+        """
+        针对 pdf2train 导出的 Markdown 进行深度清洗
+        """
+        if not text:
+            return ""
+
+        # 1. 剔除 (cid:123) 这种 PDF 字体映射失败的乱码
+        text = re.sub(r'\(cid:\d+\)', '', text)
+
+        # 2. 修复 LaTeX 里的异常空格 (小模型对 $ x _ { i } $ 这种极其细碎的 token 很难受)
+        # 尽量将其合并为 $x_{i}$
+        text = re.sub(r'(?<=\$)\s+|\s+(?=\$)', '', text) 
+        
+        # 3. 剔除连续的无意义符号，如 "......" 或 "————"（根据需要保留）
+        text = re.sub(r'\.{4,}', '...', text)
+        
+        # 4. 剔除表格解析失败产生的空行或 nan 字符
+        text = re.sub(r'\|\s*nan\s*\|', '| - |', text)
+        text = re.sub(r'\bnan\b', '', text)
+
+        # 5. 归一化空白：将多个换行符限制在最多两个，保持段落感但不过度空旷
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        return text.strip()
+          
     async def generate_pretrain_stream(self, doc_ids: List[int]) -> AsyncGenerator[str, None]:
+        """
+        智能预训练数据导出：逻辑完整性优先
+        """
+        sql_provider = SqlProvider(model=DocumentChunk)
+        
+        # 设定阈值：比如 3000 字（留出余量给 System Prompt 和特殊符号）
+        MAX_SAFE_LENGTH = 3000 
+        
+        # 按照 chunk_index 排序至关重要，保证文章顺序
+        stmt = text("SELECT content FROM document_chunks WHERE document_id = :doc_id ORDER BY chunk_index ASC")
+        
+        for doc_id in doc_ids:
+            async with sql_provider.get_db_session() as session:
+                result = await session.execute(stmt, {"doc_id": doc_id})
+                rows = result.fetchall()
+                if not rows: continue
+                
+                # Buffer: 当前正在组装的训练样本
+                current_buffer_text = ""
+                
+                for r in rows:
+                    raw_chunk = r[0]
+                    if not raw_chunk: continue
+                    chunk_text = self.clean_agri_text(raw_chunk)
+                    if not chunk_text: continue
+                    # 1. 预判：如果把这一段加进去，会不会撑爆？
+                    if len(current_buffer_text) + len(chunk_text) > MAX_SAFE_LENGTH:
+                        # --- 撑爆了，先结算上一批 ---
+                        
+                        # 只有当 buffer 里有货时才 yield
+                        if current_buffer_text.strip():
+                            formatted_text = f"<|im_start|>text\n{current_buffer_text}\n<|im_end|>"
+                            entry = {
+                                "text": formatted_text,
+                                "meta": {"doc_id": doc_id, "source": "pdf2train"}
+                            }
+                            yield json.dumps(entry, ensure_ascii=False) + "\n"
+                        
+                        # --- 开启新的轮回 ---
+                        # 当前这个 chunk 成了下一批的开头
+                        current_buffer_text = chunk_text
+                        
+                    else:
+                        # --- 没撑爆，继续往里塞 ---
+                        # 加个换行符，保持段落感
+                        if current_buffer_text:
+                            current_buffer_text += "\n\n" 
+                        current_buffer_text += chunk_text
+                
+                # 2. 循环结束，把最后剩的一点点也发出去
+                if current_buffer_text.strip():
+                    formatted_text = f"<|im_start|>text\n{current_buffer_text}\n<|im_end|>"
+                    entry = {
+                        "text": formatted_text,
+                        "meta": {"doc_id": doc_id, "source": "pdf2train"}
+                    }
+                    yield json.dumps(entry, ensure_ascii=False) + "\n"
+            
+    async def generate_pretrain_stream_bake(self, doc_ids: List[int]) -> AsyncGenerator[str, None]:
         """Stream generator for pretrain data"""
         sql_provider = SqlProvider(model=DocumentChunk)
         stmt = text("SELECT content, meta_info FROM document_chunks WHERE document_id = :doc_id ORDER BY chunk_index ASC")

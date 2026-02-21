@@ -30,6 +30,7 @@ from pdf2train.api.routers import instruction_datum_router
 from pdf2train.api.routers import chunk_router
 from pdf2train.api.routers import instruction_gen_router
 from pdf2train.api.routers import qdrant_router
+from pdf2train.api.routers import retrieval_router
 
 from pdf2train.core.service.pipeline_task_service import PipelineTaskService
 from pdf2train.core.service.pdf_document_service import PdfDocumentService
@@ -123,6 +124,7 @@ app.include_router(instruction_datum_router.router)
 app.include_router(chunk_router.router)
 app.include_router(instruction_gen_router.router)
 app.include_router(qdrant_router.router)
+app.include_router(retrieval_router.router)
 
 
 @app.get("/")

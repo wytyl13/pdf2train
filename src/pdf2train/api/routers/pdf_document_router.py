@@ -17,6 +17,7 @@ from pdf2train.api.schema.pdf_document_schema import (
     PdfDocExportBooksReq, PdfDocCountByKbReq
 )
 from pdf2train.api.schema.knowledge_base_schema import RelationAction
+from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreRichDTO
 from pdf2train.core.schema.base_schema import PageResult
 from pdf2train.core.schema.pdf_document_dto import (
     PdfDocUpdateDTO, PdfDocFilterDTO, PdfDocRichDTO
@@ -449,7 +450,7 @@ async def update_doc(
             # 场景 4b: 绑定/更换知识库 + 修改模型
             else:
                 # 验证新模型是否与目标知识库匹配
-                target_kb = await kb_manager.get_kb_detail(new_kb_id)
+                target_kb: KnowledgeBaseCoreRichDTO = await kb_manager.get_kb_detail(new_kb_id)
                 if not target_kb:
                     return make_response(False, "目标知识库不存在", code=404)
 

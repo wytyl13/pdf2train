@@ -9,6 +9,7 @@
 import os
 import logging
 import asyncio
+import re
 from typing import Optional
 from fastapi import BackgroundTasks
 
@@ -72,6 +73,22 @@ class Pdf2MdManager:
             split_pages=split_pages
         )
 
+    def get_short_safe_name(self, filename, max_chars=50):
+        # 1. 分离文件名和后缀
+        # 例如: "非常长...的文档.pdf" -> name="非常长...的文档", ext=".pdf"
+        name, ext = os.path.splitext(filename)
+        
+        # 2. (可选但推荐) 清洗掉怪异字符，避免 S3 报错
+        # 把非中文、非英文、非数字的字符换成下划线
+        name = re.sub(r'[^\w\u4e00-\u9fa5\-]', '_', name)
+
+        # 3. 截取前 max_chars 个字符
+        # 比如截取前 50 个字。如果文件名本身短于 50，这行代码也不会报错
+        short_name = name[:max_chars]
+        
+        # 4. 拼回后缀
+        return f"{short_name}{ext}"
+
     async def process_pdf_pipeline(self, task_id: int, doc_id: int, is_ocr: bool, split_pages: int) -> None:
         """后台执行转换流程"""
         task_dir = await self.worker_service.prepare_workspace(doc_id)
@@ -123,6 +140,7 @@ class Pdf2MdManager:
             ))
             
             final_name = os.path.splitext(doc.file_name)[0]
+            final_name = self.get_short_safe_name(final_name)
             # 获取 MinIO Base URL (用于图片链接拼接)
             minio_base = core_config.minio_config.minio_public_url # 假设 Config 能取到，或者通过 MinioService 取
             if not minio_base.startswith("http"): minio_base = f"http://{minio_base}"

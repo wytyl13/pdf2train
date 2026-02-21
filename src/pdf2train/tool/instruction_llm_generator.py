@@ -310,7 +310,7 @@ class InstructionLLMGenerator:
         try:
             if not llm_config:
                 # 如果没找到配置，抛出异常或者返回默认
-                raise ValueError(f"LLM Config not found for doc_id: {doc_id}")
+                raise ValueError(f"LLM Config not found for doc_id")
 
             # 创建全新的 Client 实例
             new_client = OpenAI(
@@ -703,7 +703,6 @@ class InstructionLLMGenerator:
             if negative_sample_quota > 0 and complexity == "hard" and random.random() > 0.5:
                 tasks_to_run.append((topic_str, "无法回答"))
                 negative_sample_quota -= 1
-            break
         # 3 收集本章节所有生成的数据
         chapter_results = []
         

@@ -288,7 +288,7 @@ class DocumentChunkManager:
         # We need to query PDFDocument table. 
         # Ideally, there should be a PdfDocumentService, but for now we use SqlProvider directly or a service if available.
         # Assuming we can just query the table directly here via a Provider as this is read-only logic.
-        doc_ids: List[int] = self.pdf_document_service.get_doc_ids_by_kb_ids(kb_ids)
+        doc_ids: List[int] = await self.pdf_document_service.get_doc_ids_by_kb_ids(kb_ids)
             
         if not doc_ids:
             yield ""

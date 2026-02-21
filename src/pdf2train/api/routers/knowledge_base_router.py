@@ -23,7 +23,7 @@ from pdf2train.api.schema.knowledge_base_schema import (
 )
 
 # 2. 引入 Core DTO (业务契约)
-from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO
+from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreDTO, KnowledgeBaseUpdateDTO, KnowledgeBaseCoreRichDTO
 from pdf2train.core.schema.qdrant_dto import QdrantPayloadUpdateDTO, VectorDeleteRequest
 from pdf2train.core.schema.base_schema import PageResult
 
@@ -139,8 +139,20 @@ async def get_kb_detail(
 ):
     """获取知识库详情"""
     try:
-        data: KnowledgeBase = await manager.get_kb_detail(req.id)
+        data: KnowledgeBaseCoreRichDTO = await manager.get_kb_detail(req.id)
         return make_response(True, "查询成功", data) if data else make_response(False, "知识库不存在", code=404)
+    except Exception as e:
+        return make_response(False, f"查询失败: {str(e)}", code=500)
+
+@router.post("/get_embedding_config_override")
+async def get_embedding_config_override(
+    req: KBDetailReq, 
+    manager: KnowledgeBaseManager = Depends(get_knowledge_base_manager)
+):
+    """获取知识库详情"""
+    try:
+        data: KnowledgeBase = await manager.get_embedding_config_override(req.id)
+        return make_response(True, "查询成功！", data)
     except Exception as e:
         return make_response(False, f"查询失败: {str(e)}", code=500)
 

@@ -6,7 +6,7 @@
 @File    : llm_config_dto.py
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 
 
@@ -15,6 +15,8 @@ class LLMConfigCoreDTO(BaseModel):
     [Service层契约] 用于创建配置
     特点：不包含 Enum 对象，只包含存入数据库的字符串
     """
+    model_config = ConfigDict(from_attributes=True)
+    
     name: str
     model_type: str 
     provider: str

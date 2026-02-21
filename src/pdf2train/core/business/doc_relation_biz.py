@@ -20,6 +20,7 @@ from pdf2train.core.manager.qdrant_manager import QdrantManager
 
 # 导入 DTO
 from pdf2train.api.schema.knowledge_base_schema import RelationAction
+from pdf2train.core.schema.knowledge_base_dto import KnowledgeBaseCoreRichDTO
 from pdf2train.core.schema.qdrant_dto import EmbeddingTaskDTO, QdrantPayloadUpdateDTO, VectorDeleteRequest
 
 class KBUpdateDocsReqDTO(BaseModel):
@@ -57,7 +58,7 @@ class DocRelationBiz:
         mismatch_docs_count = 0
         try:
             # 1. 获取目标知识库信息以拿到 collection_name
-            kb_info: KnowledgeBase = await self.kb_manager.get_kb_detail(req.kb_id)
+            kb_info: KnowledgeBaseCoreRichDTO = await self.kb_manager.get_kb_detail(req.kb_id)
             if not kb_info: raise ValueError("目标知识库不存在")
             
             collection_name = await self.kb_manager.get_collection_name_by_kb_id(kb_info.id)
