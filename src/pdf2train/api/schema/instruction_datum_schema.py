@@ -49,6 +49,7 @@ class InstructionDeleteReq(BaseModel):
     对应 Router: /api/instruction/delete
     """
     id: str = Field(..., description="要删除的指令ID (UUID)")
+    
 
 class InstructionClearByDocReq(BaseModel):
     """
